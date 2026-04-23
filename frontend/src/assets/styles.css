@@ -1,0 +1,267 @@
+@import 'tailwindcss/base';
+@import 'tailwindcss/components';
+@import 'tailwindcss/utilities';
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap');
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: 'Inter', sans-serif;
+  overflow: hidden;
+}
+
+#app {
+  width: 100vw;
+  height: 100vh;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #f1f1f1;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #888;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #555;
+}
+
+/* Grid background */
+.grid-background {
+  background-color: #F7F7F7;
+  background-image: radial-gradient(circle, #D1D5DB 1px, transparent 1px);
+  background-size: 10px 10px;
+}
+
+/* Selection styles */
+.selected {
+  outline: 2px solid #6366F1;
+  outline-offset: 2px;
+}
+
+/* Lasso selection */
+.lasso-selection {
+  position: absolute;
+  border: 2px dashed #6366F1;
+  background-color: rgba(99, 102, 241, 0.1);
+  pointer-events: none;
+  z-index: 1000;
+}
+
+/* Note styles */
+.note {
+  position: absolute;
+  cursor: move;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+  transition: box-shadow 0.2s;
+  user-select: none;
+}
+
+.note:hover {
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+.note.dragging {
+  opacity: 0.8;
+  z-index: 100;
+}
+
+.note-content {
+  width: 100%;
+  height: 100%;
+  padding: 12px;
+  border: none;
+  background: transparent;
+  resize: none;
+  font-family: 'Inter', sans-serif;
+  font-size: 14px;
+  outline: none;
+}
+
+.resize-handle {
+  position: absolute;
+  bottom: 0;
+  right: 0;
+  width: 16px;
+  height: 16px;
+  cursor: nwse-resize;
+  background: linear-gradient(135deg, transparent 50%, rgba(0, 0, 0, 0.2) 50%);
+}
+
+/* Board card styles */
+.board-card {
+  position: absolute;
+  cursor: pointer;
+  background: white;
+  border: 1px solid #E5E7EB;
+  border-radius: 12px;
+  padding: 16px;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+  user-select: none;
+}
+
+.board-emoji {
+  font-size: 32px;
+  margin-bottom: 8px;
+}
+
+.board-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: #1F2937;
+  margin-bottom: 8px;
+  word-break: break-word;
+}
+
+.board-meta {
+  font-size: 12px;
+  color: #6B7280;
+}
+
+/* Toolbar styles */
+.toolbar {
+  background: white;
+  border-right: 1px solid #E5E7EB;
+  box-shadow: 2px 0 4px rgba(0, 0, 0, 0.05);
+}
+
+.toolbar-button {
+  width: 48px;
+  height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  border-radius: 8px;
+  transition: background-color 0.2s;
+  position: relative;
+}
+
+.toolbar-button:hover {
+  background-color: #F3F4F6;
+}
+
+.toolbar-button.active {
+  background-color: #EEF2FF;
+  color: #6366F1;
+}
+
+/* Tooltip */
+.tooltip {
+  position: absolute;
+  left: 100%;
+  margin-left: 8px;
+  background: #1F2937;
+  color: white;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s;
+  z-index: 1000;
+}
+
+.toolbar-button:hover .tooltip {
+  opacity: 1;
+}
+
+/* Color picker */
+.color-picker {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  padding: 12px;
+  background: white;
+  border: 1px solid #E5E7EB;
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+.color-option {
+  width: 32px;
+  height: 32px;
+  border-radius: 6px;
+  cursor: pointer;
+  border: 2px solid transparent;
+  transition: transform 0.2s, border-color 0.2s;
+}
+
+.color-option:hover {
+  transform: scale(1.1);
+}
+
+.color-option.selected {
+  border-color: #6366F1;
+}
+
+/* Context menu */
+.context-menu {
+  position: fixed;
+  background: white;
+  border: 1px solid #E5E7EB;
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  padding: 4px;
+  z-index: 2000;
+  min-width: 160px;
+}
+
+.context-menu-item {
+  padding: 8px 12px;
+  cursor: pointer;
+  border-radius: 4px;
+  font-size: 14px;
+  transition: background-color 0.2s;
+}
+
+.context-menu-item:hover {
+  background-color: #F3F4F6;
+}
+
+.context-menu-item.danger:hover {
+  background-color: #FEE2E2;
+  color: #DC2626;
+}
+
+/* Empty state */
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: #6B7280;
+}
+
+.empty-state img {
+  width: 200px;
+  height: 200px;
+  margin-bottom: 24px;
+  opacity: 0.5;
+}
+
+.empty-state h2 {
+  font-size: 24px;
+  font-weight: 600;
+  margin-bottom: 8px;
+  color: #1F2937;
+}
+
+.empty-state p {
+  font-size: 14px;
+}
