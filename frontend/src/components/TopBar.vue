@@ -41,7 +41,11 @@ function navigateToBoard(boardId) {
 }
 
 async function logout() {
-  await auth.logout()
+  try {
+    await auth.logout()
+  } catch (err) {
+    console.error('Logout failed:', err)
+  }
   router.push('/login')
 }
 </script>

@@ -1,6 +1,8 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import WorkspaceView from '../views/WorkspaceView.vue'
 import LoginView from '../views/LoginView.vue'
+import ForgotPasswordView from '../views/ForgotPasswordView.vue'
+import ResetPasswordView from '../views/ResetPasswordView.vue'
 import { useAuthStore } from '../store/auth'
 
 const routes = [
@@ -8,6 +10,16 @@ const routes = [
     path: '/login',
     name: 'Login',
     component: LoginView
+  },
+  {
+    path: '/forgot-password',
+    name: 'ForgotPassword',
+    component: ForgotPasswordView
+  },
+  {
+    path: '/reset-password',
+    name: 'ResetPassword',
+    component: ResetPasswordView
   },
   {
     path: '/',

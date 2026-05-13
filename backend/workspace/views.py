@@ -4,9 +4,15 @@ import traceback
 from urllib import parse, request, error
 
 from django.conf import settings
-from django.contrib.auth import login, logout
+from django.contrib.auth import authenticate, login, logout
 from django.contrib.auth.models import User
+from django.contrib.auth.password_validation import validate_password
+from django.contrib.auth.tokens import default_token_generator
+from django.core.exceptions import ValidationError
+from django.core.mail import send_mail
 from django.shortcuts import get_object_or_404
+from django.utils.encoding import force_bytes, force_str
+from django.utils.http import urlsafe_base64_decode, urlsafe_base64_encode
 from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_exempt
 from rest_framework import viewsets, status
@@ -113,6 +119,13 @@ def get_current_user_data(user):
     }
 
 
+def get_password_reset_link(request, user):
+    uid = urlsafe_base64_encode(force_bytes(user.pk))
+    token = default_token_generator.make_token(user)
+    reset_path = f"/reset-password?uid={uid}&token={token}"
+    return f"{request.scheme}://{request.get_host()}{reset_path}"
+
+
 class CurrentUserView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -154,6 +167,95 @@ class GoogleLoginView(APIView):
         return Response(get_current_user_data(user))
 
 
+@method_decorator(csrf_exempt, name='dispatch')
+class EmailLoginView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        email = (request.data.get('email') or '').strip()
+        password = request.data.get('password') or ''
+
+        if not email or not password:
+            raise AuthenticationFailed('Email és jelszó megadása kötelező.')
+
+        try:
+            user = User.objects.get(email__iexact=email)
+        except User.DoesNotExist:
+            raise AuthenticationFailed('Érvénytelen email vagy jelszó.')
+
+        if not user.has_usable_password():
+            raise AuthenticationFailed('A felhasználónak nincs beállított jelszava. Használd az Elfelejtetted a jelszavad funkciót.')
+
+        user = authenticate(request, username=user.username, password=password)
+        if user is None:
+            raise AuthenticationFailed('Érvénytelen email vagy jelszó.')
+
+        login(request, user)
+        return Response(get_current_user_data(user))
+
+
+@method_decorator(csrf_exempt, name='dispatch')
+class PasswordResetRequestView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        email = (request.data.get('email') or '').strip()
+        if not email:
+            return Response({'detail': 'Adj meg egy email címet.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        users = User.objects.filter(email__iexact=email)
+        for user in users:
+            reset_link = get_password_reset_link(request, user)
+            message = (
+                f"Szia,\n\n"
+                f"Kérted a jelszó visszaállítását. Kattints a következő linkre a jelszó megváltoztatásához:\n\n"
+                f"{reset_link}\n\n"
+                "Ha nem te kérted, akkor nyugodtan hagyd figyelmen kívül ezt az üzenetet."
+            )
+            send_mail(
+                subject='Jelszó visszaállítás',
+                message=message,
+                from_email=settings.DEFAULT_FROM_EMAIL,
+                recipient_list=[user.email],
+                fail_silently=False,
+            )
+
+        return Response({'detail': 'Ha létezik ilyen email című felhasználó, küldtünk neki visszaállító linket.'})
+
+
+@method_decorator(csrf_exempt, name='dispatch')
+class PasswordResetConfirmView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        uid = request.data.get('uid')
+        token = request.data.get('token')
+        new_password = request.data.get('password') or ''
+
+        if not uid or not token or not new_password:
+            raise AuthenticationFailed('Érvénytelen kérés.')
+
+        try:
+            uid = force_str(urlsafe_base64_decode(uid))
+            user = User.objects.get(pk=uid)
+        except (TypeError, ValueError, OverflowError, User.DoesNotExist):
+            raise AuthenticationFailed('Érvénytelen visszaállító hivatkozás.')
+
+        if not default_token_generator.check_token(user, token):
+            raise AuthenticationFailed('Érvénytelen vagy lejárt hivatkozás.')
+
+        try:
+            validate_password(new_password, user)
+        except ValidationError as exc:
+            return Response({'detail': exc.messages}, status=status.HTTP_400_BAD_REQUEST)
+
+        user.set_password(new_password)
+        user.save()
+
+        return Response({'detail': 'A jelszó sikeresen visszaállítva.'})
+
+
+@method_decorator(csrf_exempt, name='dispatch')
 class LogoutView(APIView):
     permission_classes = [IsAuthenticated]
 

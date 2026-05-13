@@ -35,8 +35,29 @@ export const useAuthStore = defineStore('auth', () => {
     return user.value
   }
 
+  async function loginWithEmail(email, password) {
+    const response = await authApi.post('login/', { email, password })
+    user.value = response.data
+    isLoaded.value = true
+    return user.value
+  }
+
+  async function requestPasswordReset(email) {
+    await authApi.post('password-reset/', { email })
+    return true
+  }
+
+  async function confirmPasswordReset(uid, token, password) {
+    await authApi.post('password-reset-confirm/', { uid, token, password })
+    return true
+  }
+
   async function logout() {
-    await authApi.post('logout/')
+    try {
+      await authApi.post('logout/')
+    } catch (err) {
+      console.error('Logout request failed:', err)
+    }
     user.value = null
     return true
   }
@@ -46,6 +67,9 @@ export const useAuthStore = defineStore('auth', () => {
     isLoaded,
     loadUser,
     loginWithGoogle,
+    loginWithEmail,
+    requestPasswordReset,
+    confirmPasswordReset,
     logout,
   }
 })
