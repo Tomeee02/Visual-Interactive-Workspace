@@ -1,0 +1,73 @@
+# Visual Interactive Workspace - Setup Commands
+
+# 1. Update package lists
+sudo apt update
+
+# 2. Install Python venv support (and pip if needed)
+sudo apt install python3-venv python3-pip -y
+
+# 3. (Optional) Install SSH server so you can SSH into the VM
+sudo apt install openssh-server -y
+sudo systemctl enable --now ssh
+
+# 4. Check the server IP address
+hostname -I
+# or
+ip addr show
+
+# 5. If using SSH keys, generate one and add it to GitHub
+ssh-keygen -t ed25519 -C "your-email@example.com"
+cat ~/.ssh/id_ed25519.pub
+# Then copy the output to GitHub Settings -> SSH and GPG keys
+
+# 6. Test GitHub SSH access
+ssh -T git@github.com
+
+# 7. Clone the repository
+# Use HTTPS if you do not want SSH configured:
+git clone https://github.com/Tomeee02/Visual-Interactive-Workspace.git
+# or with SSH after key setup:
+git clone git@github.com:Tomeee02/Visual-Interactive-Workspace.git
+
+# 8. Enter the project folder
+cd Visual-Interactive-Workspace
+
+# 9. Check branches and latest branch
+git branch -a
+
+# 10. Checkout the correct branch if needed
+git checkout initial-commit
+
+# 11. Backend setup
+cd app/backend
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+# 12. Create and edit the environment file
+cp .env.example .env
+# Edit backend/.env to set GOOGLE_CLIENT_ID and any other secrets
+
+# 13. Run database migrations
+python manage.py makemigrations
+python manage.py migrate
+
+# 14. Create Django superuser
+python manage.py createsuperuser
+
+# 15. Start backend server (development)
+python manage.py runserver 0.0.0.0:8000
+
+# 16. Frontend setup (new terminal or after backend setup)
+cd ../frontend
+pnpm install
+pnpm run dev
+
+# 17. Optional: set Hungarian keyboard layout on Ubuntu server
+sudo dpkg-reconfigure keyboard-configuration
+sudo service keyboard-setup restart
+# or
+sudo localectl set-keymap hu
+
+# 18. If you want to use HTTPS Git clone instead of SSH later
+# git clone https://github.com/Tomeee02/Visual-Interactive-Workspace.git
