@@ -128,6 +128,8 @@ CSRF_TRUSTED_ORIGINS = [
     'http://localhost:5173',
     'http://127.0.0.1:5173',
     'http://172.20.144.1:5173',
+    'http://100.109.203.39:5173',  # ha Tailscale IP-t használsz
+    'http://100.84.165.107:5173',  # ha Tailscale IP-t használsz
 ]
 
 # REST Framework settings
