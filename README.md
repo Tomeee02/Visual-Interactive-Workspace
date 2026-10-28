@@ -6,11 +6,15 @@ A visual, interactive workspace combining features from Miro, Notion, and Trello
 
 - **Free-positioned Notes**: Create sticky notes anywhere on the canvas
 - **Hierarchical Boards**: Organize content in nested boards
+- **Board Templates**: Start new boards with layouts for weekly planning, project kickoffs, meeting notes, study plans, brainstorming, and retrospectives
 - **Drag & Drop**: Move single or multiple items with grid snapping
 - **Multi-select**: Select multiple items with Ctrl/Cmd+click or lasso selection
 - **Customization**: Change note colors, board emojis, and content
+- **File Preview**: Select a PDF, Word document, or image and use Preview in the left toolbar to switch between its preview and a file-type icon with the filename and size. The setting is saved per file. Document previews require a generated thumbnail; Word thumbnails require LibreOffice.
 - **Navigation**: Breadcrumb trail for easy board navigation
 - **Keyboard Shortcuts**: Delete items with Delete/Backspace key
+- **Table Formulas**: Cells display calculated results with a small fx indicator when not being edited. Hover over the indicator to see the full formula. Double-click a formula cell or its indicator to edit its full formula; the indicator is hidden while editing. Click outside the cell to show the result again.
+- **Table Navigation**: Enter moves focus one cell down and Tab one cell right; hold Shift to move up or left. At the table edge, focus stays in the current cell. When formula suggestions are open, Enter or Tab inserts the selected function first.
 
 ## Tech Stack
 
@@ -83,7 +87,12 @@ python manage.py migrate
 python manage.py createsuperuser
 ```
 
-7. Start the Django server:
+7. Install LibreOffice for accurate `.doc` and `.docx` previews. On Windows:
+```powershell
+winget install --id TheDocumentFoundation.LibreOffice --exact
+```
+
+8. Start the Django server:
 ```bash
 python manage.py runserver
 ```
@@ -106,13 +115,14 @@ The app supports Google login on the frontend. To enable it:
 
 1. **Create Notes**: Click the note icon in the left toolbar
 2. **Create Boards**: Click the board icon in the left toolbar
-3. **Edit Content**: Double-click on notes or board titles to edit
-4. **Select Items**: Click to select, Ctrl/Cmd+click for multi-select, or drag to lasso
-5. **Move Items**: Drag selected items to reposition (snaps to 20px grid)
-6. **Change Colors**: Select notes and use the color picker in the toolbar
-7. **Change Emoji**: Select boards and use the emoji picker in the toolbar
-8. **Navigate Boards**: Double-click a board to open it, use breadcrumbs to go back
-9. **Delete Items**: Select items and press Delete or Backspace
+3. **Choose a Board Template**: Open a newly created board and select a template, optionally keeping its example content
+4. **Edit Content**: Double-click on notes or board titles to edit
+5. **Select Items**: Click to select, Ctrl/Cmd+click for multi-select, or drag to lasso
+6. **Move Items**: Drag selected items to reposition (snaps to 20px grid)
+7. **Change Colors**: Select notes and use the color picker in the toolbar
+8. **Change Emoji**: Select boards and use the emoji picker in the toolbar
+9. **Navigate Boards**: Double-click a board to open it, use breadcrumbs to go back
+10. **Delete Items**: Select items and press Delete or Backspace
 
 ## API Endpoints
 

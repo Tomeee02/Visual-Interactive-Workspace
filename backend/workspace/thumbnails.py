@@ -1,10 +1,12 @@
 """Thumbnail generation for uploaded documents."""
 import os
+import shutil
+import subprocess
+import tempfile
 import uuid
-from io import BytesIO
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image
 from django.conf import settings
 
 
@@ -54,30 +56,61 @@ def generate_pdf_thumbnail(file_path):
 
 
 def generate_docx_thumbnail(file_path):
-    """Generate a thumbnail from a DOCX file.
-
-    Renders the text content as an image preview.
-    """
-    try:
-        from docx import Document
-        doc = Document(file_path)
-
-        # Render text content as an image
-        text_lines = []
-        for para in doc.paragraphs:
-            text = para.text.strip()
-            if text:
-                text_lines.append(text)
-            if len(text_lines) >= 25:  # Enough lines for a preview
-                break
-
-        if not text_lines:
-            return None
-
-        return _render_text_thumbnail(text_lines)
-    except Exception as e:
-        print(f"DOCX thumbnail generation failed: {e}")
+    """Render the first page of a Word document through LibreOffice."""
+    office_executable = _find_office_executable()
+    if not office_executable:
+        print("Word thumbnail generation skipped: LibreOffice is not installed")
         return None
+
+    try:
+        source_path = Path(file_path).resolve()
+        with tempfile.TemporaryDirectory(prefix="word-preview-") as temp_directory:
+            output_directory = Path(temp_directory)
+            profile_directory = output_directory / "profile"
+            subprocess.run(
+                [
+                    office_executable,
+                    "--headless",
+                    "--nologo",
+                    "--nodefault",
+                    "--nolockcheck",
+                    f"-env:UserInstallation={profile_directory.resolve().as_uri()}",
+                    "--convert-to",
+                    "pdf",
+                    "--outdir",
+                    str(output_directory),
+                    str(source_path),
+                ],
+                check=True,
+                capture_output=True,
+                timeout=60,
+            )
+            pdf_path = output_directory / f"{source_path.stem}.pdf"
+            if not pdf_path.is_file():
+                raise RuntimeError("LibreOffice did not create the expected PDF")
+            return generate_pdf_thumbnail(pdf_path)
+    except Exception as e:
+        print(f"Word thumbnail generation failed: {e}")
+        return None
+
+
+def _find_office_executable():
+    """Find a LibreOffice executable on PATH or in common install locations."""
+    for command in ("soffice", "libreoffice"):
+        executable = shutil.which(command)
+        if executable:
+            return executable
+
+    if os.name == "nt":
+        for environment_variable in ("PROGRAMFILES", "PROGRAMFILES(X86)"):
+            program_files = os.environ.get(environment_variable)
+            if not program_files:
+                continue
+            executable = Path(program_files) / "LibreOffice" / "program" / "soffice.exe"
+            if executable.is_file():
+                return str(executable)
+
+    return None
 
 
 def generate_image_thumbnail(file_path):
@@ -108,56 +141,6 @@ def generate_image_thumbnail(file_path):
         return f"thumbnails/{thumb_filename}"
     except Exception as e:
         print(f"Image thumbnail generation failed: {e}")
-        return None
-
-
-def _render_text_thumbnail(text_lines):
-    """Render text lines as a document-like thumbnail image."""
-    try:
-        width = THUMBNAIL_WIDTH
-        height = THUMBNAIL_HEIGHT
-
-        # Create a white background with slight shadow effect
-        img = Image.new("RGB", (width, height), "#FFFFFF")
-        draw = ImageDraw.Draw(img)
-
-        # Draw a subtle border
-        draw.rectangle([0, 0, width - 1, height - 1], outline="#E5E7EB", width=1)
-
-        # Try to use a reasonable font, fall back to default
-        font_size = 10
-        try:
-            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", font_size)
-            title_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 12)
-        except (IOError, OSError):
-            font = ImageFont.load_default()
-            title_font = font
-
-        y_offset = 14
-        x_margin = 12
-
-        # Render the first line as a "title" (bold, larger)
-        if text_lines:
-            title = text_lines[0][:40]
-            draw.text((x_margin, y_offset), title, fill="#1F2937", font=title_font)
-            y_offset += 20
-
-        # Render remaining lines as body text
-        for line in text_lines[1:]:
-            if y_offset > height - 20:
-                break
-            # Wrap long lines
-            wrapped = line[:45]
-            draw.text((x_margin, y_offset), wrapped, fill="#4B5563", font=font)
-            y_offset += 14
-
-        ensure_thumbnail_dir()
-        thumb_filename = f"{uuid.uuid4().hex}.png"
-        thumb_path = THUMBNAIL_DIR / thumb_filename
-        img.save(str(thumb_path), "PNG", quality=90)
-        return f"thumbnails/{thumb_filename}"
-    except Exception as e:
-        print(f"Text thumbnail rendering failed: {e}")
         return None
 
 

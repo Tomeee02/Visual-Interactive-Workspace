@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import api from '../services/api'
+import { BOARD_TEMPLATES } from '../boardTemplates'
 
 export const useWorkspaceStore = defineStore('workspace', () => {
   // State
@@ -24,8 +25,13 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   const lassoRect = ref(null)
   const isLoading = ref(false)
   const pendingPlacements = ref({}) // boardId -> [itemIds] that need to be placed
+  const pendingTemplateBoards = ref(new Set())
+  const templateChooserBoardId = ref(null)
   const clipboard = ref({ items: [], isCut: false }) // items: [{type, data}], isCut: boolean
   const cutFileIds = ref(new Set()) // Track cut files (files can't be deleted, only moved on paste)
+  const undoStack = []
+  let undoGroupActive = false
+  let pendingUndoRestore = Promise.resolve()
 
   // Computed
   const currentBoard = computed(() => boards.value[currentBoardId.value])
@@ -77,7 +83,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   function updatesToApi(updates) {
     const result = {}
     for (const [key, value] of Object.entries(updates)) {
-      result[camelToSnake(key)] = value
+      result[key === 'tableData' ? 'checklist_items' : camelToSnake(key)] = value
     }
     return result
   }
@@ -92,6 +98,11 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       width: note.width,
       height: note.height,
       content: note.content,
+      item_type: note.itemType || 'note',
+      checklist_items: note.checklistItems || [],
+      title: note.title || 'New checklist',
+      show_title: note.showTitle || false,
+      accent_color: note.accentColor || '#FFFFFF',
       bg_color: note.bgColor,
       text_color: note.textColor
     }
@@ -118,6 +129,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       board_id: file.boardId,
       filename: file.filename,
       file_size: file.fileSize,
+      show_preview: file.showPreview !== false,
       x: file.x,
       y: file.y
     }
@@ -167,6 +179,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   }
 
   async function loadBoardData(boardId) {
+    await pendingUndoRestore
     isLoading.value = true
     try {
       // Fetch notes, child boards, and files for this board in parallel
@@ -182,6 +195,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       const filesList = Array.isArray(filesRes) ? filesRes : (filesRes.results || [])
 
       const itemIds = []
+      const pendingItemIds = []
 
       // Map notes from API (snake_case) to store (camelCase)
       notesList.forEach(n => {
@@ -194,11 +208,18 @@ export const useWorkspaceStore = defineStore('workspace', () => {
           width: n.width,
           height: n.height,
           content: n.content,
+          itemType: n.item_type || 'note',
+          checklistItems: n.checklist_items || [],
+          tableData: n.checklist_items || [],
+          title: n.title || 'New checklist',
+          showTitle: n.show_title || false,
+          accentColor: n.accent_color || '#FFFFFF',
           bgColor: n.bg_color,
-          textColor: n.text_color
+          textColor: n.item_type === 'checklist' ? '#000000' : n.text_color
         }
         notes.value[n.id] = note
         itemIds.push(n.id)
+        if (n.x <= -9000 && n.y <= -9000) pendingItemIds.push(n.id)
       })
 
       // Map child boards from API
@@ -220,6 +241,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
         }
         boards.value[b.id] = board
         itemIds.push(b.id)
+        if (b.x <= -9000 && b.y <= -9000) pendingItemIds.push(b.id)
       })
 
       // Map files from API
@@ -235,12 +257,20 @@ export const useWorkspaceStore = defineStore('workspace', () => {
           fileSize: f.file_size,
           fileUrl: f.file_url,
           thumbnailUrl: f.thumbnail_url,
+          showPreview: f.show_preview !== false,
           x: snapToGrid(f.x),
           y: snapToGrid(f.y)
         }
         files.value[f.id] = fileItem
         itemIds.push(f.id)
+        if (f.x <= -9000 && f.y <= -9000) pendingItemIds.push(f.id)
       })
+
+      if (pendingItemIds.length > 0) {
+        pendingPlacements.value[boardId] = [
+          ...new Set([...(pendingPlacements.value[boardId] || []), ...pendingItemIds])
+        ]
+      }
 
       // Also preserve any files that are currently uploading (optimistic updates)
       // so they don't disappear if loadBoardData is called during upload
@@ -277,7 +307,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     }
   }
 
-  function createNote(x, y) {
+  function createNote(x, y, overrides = {}) {
     const id = `note-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
     const note = {
       id,
@@ -288,8 +318,10 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       width: 277,
       height: 150,
       content: '',
+      accentColor: '#FFFFFF',
       bgColor: '#FEF3C7',
-      textColor: '#1F2937'
+      textColor: '#000000',
+      ...overrides
     }
     notes.value[id] = note
     if (currentBoard.value) {
@@ -300,8 +332,82 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     api.createNote(noteToApi(note)).catch(err => {
       console.error('Failed to create note:', err)
     })
+    recordCreateUndo('note', id)
     
     return note
+  }
+
+  function showTemplateChooserForNewBoard(boardId) {
+    if (!pendingTemplateBoards.value.has(boardId)) return
+
+    pendingTemplateBoards.value.delete(boardId)
+    if (boards.value[boardId]?.items?.length === 0) {
+      templateChooserBoardId.value = boardId
+    }
+  }
+
+  function dismissTemplateChooser() {
+    templateChooserBoardId.value = null
+  }
+
+  function applyBoardTemplate(templateId, keepExamples = false) {
+    const boardId = templateChooserBoardId.value
+    const template = BOARD_TEMPLATES.find(item => item.id === templateId)
+    if (!boardId || boardId !== currentBoardId.value || !template) return
+
+    template.items.forEach(item => {
+      createNote(item.x, item.y, {
+        width: item.width,
+        height: item.height,
+        bgColor: item.bgColor,
+        content: keepExamples ? item.example : item.placeholder
+      })
+    })
+    dismissTemplateChooser()
+  }
+
+  function createChecklist(x, y) {
+    const id = `checklist-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
+    const checklist = {
+      id,
+      type: 'note',
+      itemType: 'checklist',
+      boardId: currentBoardId.value,
+      x,
+      y,
+      width: 277,
+      height: 190,
+      content: '',
+      checklistItems: [{ text: '', checked: false }],
+      title: 'New checklist',
+      showTitle: false,
+      accentColor: '#FFFFFF',
+      bgColor: '#FFFFFF',
+      textColor: '#1F2937'
+    }
+    notes.value[id] = checklist
+    if (currentBoard.value) currentBoard.value.items.push(id)
+    api.createNote(noteToApi(checklist)).catch(err => {
+      console.error('Failed to create checklist:', err)
+    })
+    recordCreateUndo('note', id)
+    return checklist
+  }
+
+  function createTable(x, y) {
+    const id = `table-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
+    const table = {
+      id, type: 'note', itemType: 'table', boardId: currentBoardId.value,
+      x, y, width: 300, height: 140, content: '',
+      tableData: Array.from({ length: 4 }, () => Array(3).fill('')),
+      checklistItems: Array.from({ length: 4 }, () => Array(3).fill('')),
+      bgColor: '#FFFFFF', textColor: '#1F2937'
+    }
+    notes.value[id] = table
+    if (currentBoard.value) currentBoard.value.items.push(id)
+    api.createNote(noteToApi(table)).catch(err => console.error('Failed to create table:', err))
+    recordCreateUndo('note', id)
+    return table
   }
 
   function createBoard(x, y) {
@@ -322,6 +428,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       fileCount: 0
     }
     boards.value[id] = board
+    pendingTemplateBoards.value.add(id)
     if (currentBoard.value) {
       currentBoard.value.items.push(id)
     }
@@ -330,6 +437,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     api.createBoard(boardToApi(board)).catch(err => {
       console.error('Failed to create board:', err)
     })
+    recordCreateUndo('board', id)
     
     return board
   }
@@ -347,6 +455,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       fileSize: file.size,
       fileUrl: null,
       thumbnailUrl: null,
+      showPreview: true,
       uploading: true,
       uploadError: false,
       x: Math.round(x),
@@ -365,7 +474,6 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     formData.append('file', file)
     formData.append('file_size', String(file.size))
     formData.append('x', String(Math.round(x)))
-    formData.append('y', String(Math.round(y)))
 
     try {
       const response = await api.uploadFile(formData)
@@ -377,6 +485,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
           uploading: false,
           uploadError: false
         })
+        recordCreateUndo('file', id)
       }
     } catch (err) {
       console.error('File upload failed:', err)
@@ -395,6 +504,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
 
   function updateNote(id, updates) {
     if (notes.value[id]) {
+      recordFieldUndo('note', id, notes.value[id], updates)
       Object.assign(notes.value[id], updates)
       // Save only changed fields to backend (convert keys to snake_case)
       const apiUpdates = updatesToApi(updates)
@@ -406,6 +516,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
 
   function updateBoard(id, updates) {
     if (boards.value[id]) {
+      recordFieldUndo('board', id, boards.value[id], updates)
       Object.assign(boards.value[id], updates)
       // Save only changed fields to backend (convert keys to snake_case)
       const apiUpdates = updatesToApi(updates)
@@ -417,6 +528,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
 
   function updateFile(id, updates) {
     if (files.value[id]) {
+      recordFieldUndo('file', id, files.value[id], updates)
       Object.assign(files.value[id], updates)
       // Save only changed fields to backend (convert keys to snake_case)
       const apiUpdates = updatesToApi(updates)
@@ -426,7 +538,85 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     }
   }
 
-  function deleteItems(itemIds) {
+  async function captureDeletionSnapshot(itemIds) {
+    const boardQueue = itemIds.filter(id => boards.value[id] && id !== 'root')
+    const loadedBoards = new Set()
+
+    while (boardQueue.length > 0) {
+      const boardId = boardQueue.shift()
+      if (loadedBoards.has(boardId)) continue
+      loadedBoards.add(boardId)
+
+      await loadBoardData(boardId)
+      const board = boards.value[boardId]
+      if (!board) continue
+
+      const missingItems = board.items.filter(id => !notes.value[id] && !files.value[id] && !boards.value[id])
+      if (missingItems.length > 0) {
+        throw new Error(`Cannot snapshot unloaded items for board ${boardId}`)
+      }
+      board.items.forEach(id => {
+        if (boards.value[id] && id !== 'root') boardQueue.push(id)
+      })
+    }
+
+    const entities = []
+    const visited = new Set()
+
+    function collect(id) {
+      if (visited.has(id)) return
+      visited.add(id)
+
+      if (notes.value[id]) {
+        entities.push({ id, type: 'note', data: { ...notes.value[id] } })
+      } else if (files.value[id]) {
+        entities.push({ id, type: 'file', data: { ...files.value[id] } })
+      } else if (boards.value[id] && id !== 'root') {
+        const board = boards.value[id]
+        entities.push({ id, type: 'board', data: { ...board, items: [...board.items] } })
+        board.items.forEach(collect)
+      }
+    }
+
+    itemIds.forEach(collect)
+    return {
+      kind: 'delete',
+      entities,
+      selectedIds: [...itemIds],
+      boardItems: Object.fromEntries(
+        Object.entries(boards.value).map(([id, board]) => [id, [...board.items]])
+      ),
+      pendingPlacements: Object.fromEntries(
+        Object.entries(pendingPlacements.value).map(([id, placements]) => [id, [...placements]])
+      )
+    }
+  }
+
+  async function deleteItems(itemIds) {
+    let deletionSnapshot
+    try {
+      deletionSnapshot = await captureDeletionSnapshot(itemIds)
+    } catch (error) {
+      console.error('Failed to snapshot deleted items:', error)
+      return
+    }
+    if (deletionSnapshot.entities.length === 0) return
+
+    await Promise.all(deletionSnapshot.entities
+      .filter(entity => entity.type === 'file')
+      .map(async ({ data }) => {
+        if (!data.fileUrl) return
+        try {
+          const response = await fetch(data.fileUrl, { credentials: 'include' })
+          if (response.ok) data.undoBlob = await response.blob()
+        } catch (error) {
+          console.error('Failed to preserve file for undo:', error)
+        }
+      }))
+
+    pushUndoAction(deletionSnapshot)
+    const deleteRequests = []
+
     itemIds.forEach(id => {
       if (notes.value[id]) {
         const board = currentBoard.value
@@ -434,44 +624,47 @@ export const useWorkspaceStore = defineStore('workspace', () => {
           board.items = board.items.filter(itemId => itemId !== id)
         }
         delete notes.value[id]
-        api.deleteNote(id).catch(console.error)
+        deleteRequests.push(api.deleteNote(id).catch(console.error))
       } else if (files.value[id]) {
         const board = currentBoard.value
         if (board) {
           board.items = board.items.filter(itemId => itemId !== id)
         }
         delete files.value[id]
-        api.deleteFile(id).catch(console.error)
+        deleteRequests.push(api.deleteFile(id).catch(console.error))
       } else if (boards.value[id] && id !== 'root') {
         const board = boards.value[id]
         const parentBoard = boards.value[board.parentId]
         if (parentBoard) {
           parentBoard.items = parentBoard.items.filter(itemId => itemId !== id)
         }
-        deleteBoard(id)
+        deleteBoard(id, deleteRequests)
       }
     })
+    deletionSnapshot.deletePromise = Promise.all(deleteRequests)
     selectedItems.value.clear()
+    await deletionSnapshot.deletePromise
   }
 
-  function deleteBoard(boardId) {
+  function deleteBoard(boardId, deleteRequests = []) {
     const board = boards.value[boardId]
     if (!board) return
 
     board.items.forEach(itemId => {
       if (notes.value[itemId]) {
         delete notes.value[itemId]
-        api.deleteNote(itemId).catch(console.error)
+        deleteRequests.push(api.deleteNote(itemId).catch(console.error))
       } else if (files.value[itemId]) {
         delete files.value[itemId]
-        api.deleteFile(itemId).catch(console.error)
+        deleteRequests.push(api.deleteFile(itemId).catch(console.error))
       } else if (boards.value[itemId]) {
-        deleteBoard(itemId)
+        deleteBoard(itemId, deleteRequests)
       }
     })
 
     delete boards.value[boardId]
-    api.deleteBoard(boardId).catch(console.error)
+    deleteRequests.push(api.deleteBoard(boardId).catch(console.error))
+    return deleteRequests
   }
 
   function selectItem(id, addToSelection = false) {
@@ -527,11 +720,11 @@ export const useWorkspaceStore = defineStore('workspace', () => {
         const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp', 'ico', 'tiff', 'tif', 'avif']
         const isImage = imageExts.includes(ext)
         
-        if (file.thumbnailUrl) {
+        if (file.showPreview !== false && !isImage && file.thumbnailUrl) {
           // PDF/DOCX with thumbnail: 284px x 410px
           itemWidth = 284
           itemHeight = 410
-        } else if (isImage && file.fileUrl) {
+        } else if (file.showPreview !== false && isImage && file.fileUrl) {
           // Image: 284px wide, variable height (use container max)
           itemWidth = 284
           itemHeight = 360
@@ -581,6 +774,187 @@ export const useWorkspaceStore = defineStore('workspace', () => {
         }
       }
     })
+  }
+
+  function pushUndoAction(action) {
+    undoStack.push(action)
+    if (undoStack.length > 100) undoStack.shift()
+  }
+
+  function recordCreateUndo(type, id) {
+    pushUndoAction({ kind: 'create', type, id })
+  }
+
+  function recordFieldUndo(type, id, item, updates) {
+    if (undoGroupActive) return
+    const previousValues = {}
+    Object.keys(updates).forEach(key => {
+      if (item[key] !== updates[key]) previousValues[key] = item[key]
+    })
+    if (Object.keys(previousValues).length > 0) {
+      pushUndoAction({ kind: 'fields', type, id, values: previousValues })
+    }
+  }
+
+  function captureUndoSnapshot(itemIds) {
+    undoGroupActive = true
+    const entities = itemIds.flatMap(id => {
+      if (notes.value[id]) return [{ id, type: 'note', data: { ...notes.value[id] } }]
+      if (boards.value[id]) return [{ id, type: 'board', data: { ...boards.value[id] } }]
+      if (files.value[id]) return [{ id, type: 'file', data: { ...files.value[id] } }]
+      return []
+    })
+
+    return {
+      entities,
+      boardItems: Object.fromEntries(
+        Object.entries(boards.value).map(([id, board]) => [id, [...board.items]])
+      ),
+      pendingPlacements: Object.fromEntries(
+        Object.entries(pendingPlacements.value).map(([id, placements]) => [id, [...placements]])
+      )
+    }
+  }
+
+  function commitUndoSnapshot(snapshot) {
+    const currentSnapshot = captureUndoSnapshot(snapshot.entities.map(entity => entity.id))
+    undoGroupActive = false
+    if (
+      JSON.stringify(snapshot.entities) === JSON.stringify(currentSnapshot.entities) &&
+      JSON.stringify(snapshot.boardItems) === JSON.stringify(currentSnapshot.boardItems) &&
+      JSON.stringify(snapshot.pendingPlacements) === JSON.stringify(currentSnapshot.pendingPlacements)
+    ) return
+
+    pushUndoAction(snapshot)
+  }
+
+  function undoLastAction() {
+    const snapshot = undoStack.pop()
+    if (!snapshot) return false
+
+    if (snapshot.kind === 'delete') {
+      snapshot.entities.forEach(({ id, type, data }) => {
+        const restoredData = { ...data }
+        if (type === 'board') boards.value[id] = restoredData
+        else if (type === 'note') notes.value[id] = restoredData
+        else {
+          delete restoredData.undoBlob
+          files.value[id] = {
+            ...restoredData,
+            fileUrl: data.undoBlob ? data.fileUrl : null,
+            thumbnailUrl: data.undoBlob ? data.thumbnailUrl : null,
+            uploading: false,
+            uploadError: !data.undoBlob
+          }
+        }
+      })
+      Object.entries(snapshot.boardItems).forEach(([id, items]) => {
+        if (boards.value[id]) boards.value[id].items = [...items]
+      })
+      pendingPlacements.value = Object.fromEntries(
+        Object.entries(snapshot.pendingPlacements).map(([id, placements]) => [id, [...placements]])
+      )
+      snapshot.selectedIds.forEach(id => selectedItems.value.add(id))
+      pendingUndoRestore = pendingUndoRestore.then(() => restoreDeletedItems(snapshot))
+      return true
+    }
+
+    if (snapshot.kind === 'fields') {
+      const item = snapshot.type === 'note' ? notes.value[snapshot.id] : snapshot.type === 'board' ? boards.value[snapshot.id] : files.value[snapshot.id]
+      if (!item) return false
+      Object.assign(item, snapshot.values)
+      const update = snapshot.type === 'note' ? api.updateNote : snapshot.type === 'board' ? api.updateBoard : api.updateFile
+      update(snapshot.id, updatesToApi(snapshot.values)).catch(console.error)
+      return true
+    }
+
+    if (snapshot.kind === 'create') {
+      const item = snapshot.type === 'note' ? notes.value[snapshot.id] : snapshot.type === 'board' ? boards.value[snapshot.id] : files.value[snapshot.id]
+      if (!item) return false
+      Object.values(boards.value).forEach(board => {
+        board.items = board.items.filter(id => id !== snapshot.id)
+      })
+      if (snapshot.type === 'note') {
+        delete notes.value[snapshot.id]
+        api.deleteNote(snapshot.id).catch(console.error)
+      } else if (snapshot.type === 'board') {
+        delete boards.value[snapshot.id]
+        api.deleteBoard(snapshot.id).catch(console.error)
+      } else {
+        delete files.value[snapshot.id]
+        api.deleteFile(snapshot.id).catch(console.error)
+      }
+      selectedItems.value.delete(snapshot.id)
+      return true
+    }
+
+    snapshot.entities.forEach(({ id, type, data }) => {
+      const item = type === 'note' ? notes.value[id] : type === 'board' ? boards.value[id] : files.value[id]
+      if (!item) return
+
+      const updates = {}
+      for (const key of ['x', 'y', 'boardId', 'parentId']) {
+        if (item[key] !== data[key]) {
+          item[key] = data[key]
+          updates[key] = data[key]
+        }
+      }
+
+      if (Object.keys(updates).length === 0) return
+      const apiUpdates = updatesToApi(updates)
+      const update = type === 'note' ? api.updateNote : type === 'board' ? api.updateBoard : api.updateFile
+      update(id, apiUpdates).catch(console.error)
+    })
+
+    Object.entries(snapshot.boardItems).forEach(([id, items]) => {
+      if (boards.value[id]) boards.value[id].items = [...items]
+    })
+    pendingPlacements.value = Object.fromEntries(
+      Object.entries(snapshot.pendingPlacements).map(([id, placements]) => [id, [...placements]])
+    )
+    return true
+  }
+
+  async function restoreDeletedItems(snapshot) {
+    await snapshot.deletePromise
+
+    for (const { type, data } of snapshot.entities) {
+      if (type === 'board') {
+        await api.createBoard(boardToApi(data)).catch(console.error)
+      }
+    }
+
+    for (const { type, data } of snapshot.entities) {
+      if (type === 'note') {
+        await api.createNote(noteToApi(data)).catch(console.error)
+      }
+    }
+
+    for (const { id, type, data } of snapshot.entities) {
+      if (type !== 'file' || !data.undoBlob) continue
+      const upload = new FormData()
+      upload.append('id', id)
+      upload.append('board_id', data.boardId || '')
+      upload.append('filename', data.filename)
+      upload.append('file', new File([data.undoBlob], data.filename, { type: data.undoBlob.type }))
+      upload.append('file_size', String(data.fileSize || data.undoBlob.size))
+      upload.append('x', String(data.x || 0))
+      upload.append('y', String(data.y || 0))
+      upload.append('show_preview', String(data.showPreview !== false))
+
+      try {
+        const response = await api.uploadFile(upload)
+        Object.assign(files.value[id], {
+          fileUrl: response.file_url || null,
+          thumbnailUrl: response.thumbnail_url || null,
+          fileSize: response.file_size,
+          uploadError: false
+        })
+      } catch (error) {
+        console.error('Failed to restore deleted file:', error)
+        if (files.value[id]) files.value[id].uploadError = true
+      }
+    }
   }
 
   function moveItemsToBoard(itemIds, targetBoardId) {
@@ -881,6 +1255,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   return {
     // State
     currentBoardId,
+    templateChooserBoardId,
     boards,
     notes,
     files,
@@ -899,7 +1274,12 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     loadBoardAncestors,
     loadBoardData,
     createNote,
+    createChecklist,
+    createTable,
     createBoard,
+    showTemplateChooserForNewBoard,
+    dismissTemplateChooser,
+    applyBoardTemplate,
     createFileItem,
     updateNote,
     updateBoard,
@@ -912,6 +1292,9 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     setLassoRect,
     selectItemsInLasso,
     moveItems,
+    captureUndoSnapshot,
+    commitUndoSnapshot,
+    undoLastAction,
     moveItemsToBoard,
     placeItemFromPending,
     clearPendingPlacements,

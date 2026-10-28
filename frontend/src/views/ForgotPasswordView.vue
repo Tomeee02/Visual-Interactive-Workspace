@@ -1,8 +1,8 @@
 <template>
   <div class="login-page">
     <div class="login-card">
-      <h1>Elfelejtett jelszó</h1>
-      <p>Írd be az email címed, és küldünk egy visszaállító linket.</p>
+      <h1>Forgot password</h1>
+      <p>Enter your email and we will send you a reset link.</p>
 
       <form class="login-form" @submit.prevent="sendResetLink">
         <label>
@@ -11,7 +11,7 @@
         </label>
 
         <button type="submit" class="primary-button" :disabled="loading">
-          {{ loading ? 'Küldés...' : 'Visszaállító link küldése' }}
+          {{ loading ? 'Sending...' : 'Send reset link' }}
         </button>
       </form>
 
@@ -19,7 +19,7 @@
       <div v-if="error" class="login-error">{{ error }}</div>
 
       <button type="button" class="link-button" @click="goBack">
-        Vissza a bejelentkezéshez
+        Back to sign in
       </button>
     </div>
   </div>
@@ -44,10 +44,10 @@ async function sendResetLink() {
 
   try {
     await auth.requestPasswordReset(email.value)
-    message.value = 'Ha van ilyen felhasználó, küldtünk egy visszaállító linket az email címedre.'
+    message.value = 'If an account exists for this email, we sent a reset link.'
   } catch (err) {
     console.error('Password reset request failed:', err)
-    error.value = err.response?.data?.detail || 'A visszaállító link küldése sikertelen volt.'
+    error.value = err.response?.data?.detail || 'Could not send the reset link.'
   } finally {
     loading.value = false
   }

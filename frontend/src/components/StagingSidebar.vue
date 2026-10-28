@@ -15,7 +15,10 @@
       >
         <div class="item-preview">
           <!-- Note preview -->
-          <div v-if="item.type === 'note'" class="preview-note" :style="{ backgroundColor: item.bgColor }">
+          <div v-if="item.itemType === 'table'" class="preview-table">
+            <span>▦</span> 3 × 4 table
+          </div>
+          <div v-else-if="item.type === 'note'" class="preview-note" :style="{ backgroundColor: item.bgColor }">
             <span class="preview-text">{{ truncateText(item.content, 30) || 'Empty note' }}</span>
           </div>
           <!-- Board preview -->

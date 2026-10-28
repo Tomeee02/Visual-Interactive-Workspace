@@ -1,20 +1,20 @@
 <template>
   <div class="color-picker" @click.stop @mousedown.stop>
     <div class="color-picker-header">
-      {{ (type === 'bg' || type === 'boardBg') ? 'Background Color' : 'Text Color' }}
+      {{ accentPicker ? (type === 'noteAccent' ? 'Top Strip Color' : 'Checklist Color') : ((type === 'bg' || type === 'boardBg') ? 'Background Color' : 'Text Color') }}
     </div>
     <div class="color-grid">
       <div
         v-for="color in colors"
         :key="color.value"
         class="color-option"
-        :class="{ selected: selectedColor === color.value }"
-        :style="{ backgroundColor: color.value }"
+        :class="{ selected: selectedColor === color.value, empty: color.empty }"
+        :style="{ backgroundColor: color.empty ? '#FFFFFF' : color.value }"
         :title="color.name"
         @click="selectColor(color.value)"
       />
     </div>
-    <div v-if="type === 'boardBg'" class="custom-color-section">
+    <div v-if="type === 'boardBg' || accentPicker" class="custom-color-section">
       <div class="custom-color-label">Custom Color</div>
       <div class="custom-color-row">
         <input
@@ -59,48 +59,43 @@ const props = defineProps({
 const emit = defineEmits(['select', 'close'])
 
 const selectedColor = ref(props.currentColor)
-const customColor = ref(props.currentColor || '#F3F4F6')
+const customColor = ref(normalizeCustomColor(props.currentColor))
+const accentPicker = computed(() => props.type === 'checklistAccent' || props.type === 'noteAccent')
 
 // Watch for prop changes when picker reopens
 watch(() => props.currentColor, (newColor) => {
   selectedColor.value = newColor
-  if (newColor) {
-    customColor.value = newColor
-  }
+  customColor.value = normalizeCustomColor(newColor)
 })
 
-const colors = (props.type === 'bg' || props.type === 'boardBg') ? [
-  // Row 1 - Warm colors
+const backgroundColors = [
   { name: 'Cream', value: '#FEF3C7' },
   { name: 'Yellow', value: '#FDE68A' },
   { name: 'Peach', value: '#FED7AA' },
   { name: 'Orange', value: '#FDBA74' },
-  // Row 2 - Reds/Pinks
   { name: 'Blush', value: '#FECDD3' },
   { name: 'Rose', value: '#FECACA' },
   { name: 'Pink', value: '#FBCFE8' },
   { name: 'Lavender Pink', value: '#F9A8D4' },
-  // Row 3 - Purples/Blues
   { name: 'Lavender', value: '#E9D5FF' },
   { name: 'Purple', value: '#DDD6FE' },
   { name: 'Light Blue', value: '#C7D2FE' },
   { name: 'Sky', value: '#BFDBFE' },
-  // Row 4 - Cyans/Teals
   { name: 'Powder Blue', value: '#BAE6FD' },
   { name: 'Aqua', value: '#A5F3FC' },
   { name: 'Mint', value: '#99F6E4' },
   { name: 'Seafoam', value: '#A7F3D0' },
-  // Row 5 - Greens/Neutrals
   { name: 'Sage', value: '#BBF7D0' },
   { name: 'Lime', value: '#D9F99D' },
   { name: 'Beige', value: '#FEF08A' },
   { name: 'Stone', value: '#E7E5E4' },
-  // Row 6 - Grays/White
   { name: 'Pearl', value: '#F5F5F4' },
   { name: 'Silver', value: '#E5E7EB' },
   { name: 'Dove', value: '#D1D5DB' },
   { name: 'White', value: '#FFFFFF' }
-] : [
+]
+
+const textColors = [
   { name: 'Black', value: '#1F2937' },
   { name: 'Gray', value: '#6B7280' },
   { name: 'Red', value: '#DC2626' },
@@ -114,6 +109,16 @@ const colors = (props.type === 'bg' || props.type === 'boardBg') ? [
   { name: 'Pink', value: '#DB2777' },
   { name: 'White', value: '#FFFFFF' }
 ]
+
+const colors = computed(() => {
+  if (props.type === 'bg' || props.type === 'boardBg') return backgroundColors
+  if (accentPicker.value) return [{ name: 'No top strip', value: 'transparent', empty: true }, ...textColors]
+  return textColors
+})
+
+function normalizeCustomColor(color) {
+  return /^#[0-9A-Fa-f]{6}$/.test(color || '') ? color.toUpperCase() : '#FFFFFF'
+}
 
 function selectColor(color) {
   selectedColor.value = color
@@ -183,6 +188,23 @@ function applyHexInput() {
 
 .color-option.selected {
   border: 2px solid #6366F1;
+}
+
+.color-option.empty {
+  position: relative;
+  overflow: hidden;
+}
+
+.color-option.empty::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 4px;
+  width: 24px;
+  height: 2px;
+  background: #DC2626;
+  transform: rotate(-35deg);
+  transform-origin: center;
 }
 
 .custom-color-section {

@@ -1,7 +1,11 @@
 import json
 import os
+import re
 import traceback
-from urllib import parse, request, error
+import datetime
+import tempfile
+import asyncio
+from urllib import parse, request as url_request, error
 
 from django.conf import settings
 from django.contrib.auth import authenticate, login, logout
@@ -10,8 +14,12 @@ from django.contrib.auth.password_validation import validate_password
 from django.contrib.auth.tokens import default_token_generator
 from django.core.exceptions import ValidationError
 from django.core.mail import send_mail
+from django.db import transaction
+from django.db.models import Q
 from django.shortcuts import get_object_or_404
+from django.http import HttpResponse
 from django.utils.encoding import force_bytes, force_str
+from django.utils import timezone
 from django.utils.http import urlsafe_base64_decode, urlsafe_base64_encode
 from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_exempt
@@ -21,10 +29,37 @@ from rest_framework.response import Response
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.views import APIView
 from rest_framework.exceptions import AuthenticationFailed
+import pyttsx3
+import edge_tts
 
-from .models import Board, Note, FileItem
-from .serializers import BoardSerializer, NoteSerializer, FileItemSerializer
+from .models import Board, Note, FileItem, Task, UserPreference, Vault, VaultEntry
+from .serializers import BoardSerializer, NoteSerializer, FileItemSerializer, TaskSerializer, VaultEntrySerializer, VaultSerializer
 from .thumbnails import generate_thumbnail
+
+
+WINDOWS_LANGUAGE_LCIDS = {
+    'en': {'0409', '0809', '0c09', '1009', '1409', '1809', '1c09', '2009', '2409', '2809', '2c09', '3009', '3409'},
+    'hu': {'040e'},
+}
+NEURAL_SPEECH_VOICES = {
+    'en': 'en-US-AriaNeural',
+    'hu': 'hu-HU-NoemiNeural',
+}
+
+
+def voice_supports_language(voice, language_prefix):
+    language_values = getattr(voice, 'languages', []) or []
+    searchable_values = [getattr(voice, 'id', ''), getattr(voice, 'name', ''), *language_values]
+    normalized_values = [
+        value.decode('utf-8', errors='ignore').lower() if isinstance(value, bytes) else str(value).lower()
+        for value in searchable_values
+    ]
+    locale_pattern = re.compile(rf'(^|[^a-z]){re.escape(language_prefix)}(?:[-_]|$)')
+    valid_lcids = WINDOWS_LANGUAGE_LCIDS.get(language_prefix, set())
+    return any(
+        locale_pattern.search(value) or any(lcid in value.replace('0x', '') for lcid in valid_lcids)
+        for value in normalized_values
+    )
 
 
 class BoardViewSet(viewsets.ModelViewSet):
@@ -92,7 +127,7 @@ def verify_google_id_token(id_token):
 
     url = f'https://oauth2.googleapis.com/tokeninfo?id_token={parse.quote(id_token)}'
     try:
-        with request.urlopen(url, timeout=10) as resp:
+        with url_request.urlopen(url, timeout=10) as resp:
             token_info = json.load(resp)
     except error.HTTPError as exc:
         raise AuthenticationFailed('Invalid Google id_token.') from exc
@@ -131,6 +166,215 @@ class CurrentUserView(APIView):
 
     def get(self, request):
         return Response(get_current_user_data(request.user))
+
+
+class TextToSpeechView(APIView):
+    permission_classes = [IsAuthenticated]
+    language_prefixes = {'hu', 'en'}
+
+    def post(self, request):
+        text = (request.data.get('text') or '').strip()
+        language = (request.data.get('language') or '').lower()
+        language_prefix = language[:2]
+        if not text or len(text) > 10000:
+            return Response({'detail': 'Text must contain between 1 and 10000 characters.'}, status=status.HTTP_400_BAD_REQUEST)
+        if language_prefix not in self.language_prefixes:
+            return Response({'detail': 'Only English and Hungarian are supported.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        output_path = None
+        engine = None
+        try:
+            engine = pyttsx3.init()
+            matching_voices = [
+                voice for voice in engine.getProperty('voices')
+                if voice_supports_language(voice, language_prefix)
+            ]
+            if matching_voices:
+                engine.setProperty('voice', matching_voices[0].id)
+                suffix = '.wav'
+                content_type = 'audio/wav'
+            else:
+                engine.stop()
+                engine = None
+                suffix = '.mp3'
+                content_type = 'audio/mpeg'
+            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as audio_file:
+                output_path = audio_file.name
+            if matching_voices:
+                engine.save_to_file(text, output_path)
+                engine.runAndWait()
+                engine.stop()
+                engine = None
+            else:
+                speech = edge_tts.Communicate(text, NEURAL_SPEECH_VOICES[language_prefix])
+                asyncio.run(speech.save(output_path))
+            with open(output_path, 'rb') as audio_file:
+                audio = audio_file.read()
+        except Exception:
+            return Response({'detail': 'The speech service is temporarily unavailable.'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        finally:
+            if engine is not None:
+                engine.stop()
+            if output_path and os.path.exists(output_path):
+                os.remove(output_path)
+        response = HttpResponse(audio, content_type=content_type)
+        response['Content-Disposition'] = f'inline; filename="read-aloud{suffix}"'
+        return response
+
+
+class UserPreferenceView(APIView):
+    permission_classes = [IsAuthenticated]
+    planner_module_ids = {'tasks', 'fourteenDayTracker', 'dailyTracker', 'habitAnalytics'}
+
+    def validate_planner_modules(self, modules):
+        if not isinstance(modules, list) or len(modules) not in {len(self.planner_module_ids) - 1, len(self.planner_module_ids)}:
+            return False
+        ids = [module.get('id') for module in modules if isinstance(module, dict)]
+        return (
+            len(ids) == len(modules)
+            and set(ids) in (self.planner_module_ids - {'habitAnalytics'}, self.planner_module_ids)
+            and all(
+                isinstance(module.get('visibility'), dict)
+                and set(module['visibility']) == {'personal', 'work'}
+                and all(isinstance(module['visibility'][view], bool) for view in ['personal', 'work'])
+                for module in modules
+            )
+        )
+
+    def get(self, request):
+        preferences, _ = UserPreference.objects.get_or_create(user=request.user)
+        return Response({
+            'theme': preferences.theme,
+            'trackerState': preferences.tracker_state,
+            'vaultAutoLockMinutes': preferences.vault_auto_lock_minutes,
+            'brainDump': preferences.brain_dump,
+            'plannerModules': preferences.planner_modules,
+            'plannerView': preferences.planner_view,
+            'showFinishedTasks': preferences.show_finished_tasks,
+        })
+
+    def patch(self, request):
+        preferences, _ = UserPreference.objects.get_or_create(user=request.user)
+        update_fields = []
+
+        if 'theme' in request.data:
+            theme = request.data['theme']
+            if theme not in dict(UserPreference.THEME_CHOICES):
+                return Response({'theme': 'Choose light, dark, or system.'}, status=status.HTTP_400_BAD_REQUEST)
+            preferences.theme = theme
+            update_fields.append('theme')
+
+        if 'trackerState' in request.data:
+            tracker_state = request.data['trackerState']
+            if not isinstance(tracker_state, dict):
+                return Response({'trackerState': 'Must be an object.'}, status=status.HTTP_400_BAD_REQUEST)
+            preferences.tracker_state = tracker_state
+            update_fields.append('tracker_state')
+
+        if 'vaultAutoLockMinutes' in request.data:
+            auto_lock = request.data['vaultAutoLockMinutes']
+            if auto_lock not in [1, 5, 15, 30]:
+                return Response({'vaultAutoLockMinutes': 'Choose 1, 5, 15, or 30 minutes.'}, status=status.HTTP_400_BAD_REQUEST)
+            preferences.vault_auto_lock_minutes = auto_lock
+            update_fields.append('vault_auto_lock_minutes')
+
+        if 'brainDump' in request.data:
+            brain_dump = request.data['brainDump']
+            if not isinstance(brain_dump, str):
+                return Response({'brainDump': 'Must be a string.'}, status=status.HTTP_400_BAD_REQUEST)
+            preferences.brain_dump = brain_dump
+            update_fields.append('brain_dump')
+
+        if 'plannerModules' in request.data:
+            planner_modules = request.data['plannerModules']
+            if not self.validate_planner_modules(planner_modules):
+                return Response({'plannerModules': 'Must contain each supported planner module once.'}, status=status.HTTP_400_BAD_REQUEST)
+            preferences.planner_modules = planner_modules
+            update_fields.append('planner_modules')
+
+        if 'plannerView' in request.data:
+            planner_view = request.data['plannerView']
+            if planner_view not in ['personal', 'work']:
+                return Response({'plannerView': 'Choose personal or work.'}, status=status.HTTP_400_BAD_REQUEST)
+            preferences.planner_view = planner_view
+            update_fields.append('planner_view')
+
+        if 'showFinishedTasks' in request.data:
+            show_finished_tasks = request.data['showFinishedTasks']
+            if not isinstance(show_finished_tasks, bool):
+                return Response({'showFinishedTasks': 'Must be a boolean.'}, status=status.HTTP_400_BAD_REQUEST)
+            preferences.show_finished_tasks = show_finished_tasks
+            update_fields.append('show_finished_tasks')
+
+        if not update_fields:
+            return Response({'detail': 'No preferences provided.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        preferences.save(update_fields=update_fields)
+        return Response({
+            'theme': preferences.theme,
+            'trackerState': preferences.tracker_state,
+            'vaultAutoLockMinutes': preferences.vault_auto_lock_minutes,
+            'brainDump': preferences.brain_dump,
+            'plannerModules': preferences.planner_modules,
+            'plannerView': preferences.planner_view,
+            'showFinishedTasks': preferences.show_finished_tasks,
+        })
+
+
+class VaultView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        try:
+            vault = Vault.objects.get(owner=request.user)
+        except Vault.DoesNotExist:
+            return Response({'configured': False})
+        return Response({'configured': True, **VaultSerializer(vault).data})
+
+    def post(self, request):
+        if Vault.objects.filter(owner=request.user).exists():
+            return Response({'detail': 'Vault is already configured.'}, status=status.HTTP_409_CONFLICT)
+        serializer = VaultSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        vault = serializer.save(owner=request.user)
+        return Response({'configured': True, **VaultSerializer(vault).data}, status=status.HTTP_201_CREATED)
+
+    def patch(self, request):
+        vault = get_object_or_404(Vault, owner=request.user)
+        expected_revision = request.data.get('revision')
+        if expected_revision != vault.revision:
+            return Response({'detail': 'Vault configuration changed. Reload and retry.'}, status=status.HTTP_409_CONFLICT)
+        serializer = VaultSerializer(vault, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save(revision=vault.revision + 1)
+        return Response({'configured': True, **serializer.data})
+
+
+class VaultEntryViewSet(viewsets.ModelViewSet):
+    serializer_class = VaultEntrySerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return VaultEntry.objects.filter(owner=self.request.user)
+
+    def perform_create(self, serializer):
+        vault = get_object_or_404(Vault, owner=self.request.user)
+        serializer.save(owner=self.request.user, vault=vault)
+
+
+class VaultEntryBulkView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        entries = request.data.get('entries')
+        if not isinstance(entries, list) or not entries or len(entries) > 500:
+            return Response({'entries': 'Provide between 1 and 500 encrypted entries.'}, status=status.HTTP_400_BAD_REQUEST)
+        vault = get_object_or_404(Vault, owner=request.user)
+        serializer = VaultEntrySerializer(data=entries, many=True)
+        serializer.is_valid(raise_exception=True)
+        with transaction.atomic():
+            serializer.save(owner=request.user, vault=vault)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
 
 
 @method_decorator(csrf_exempt, name='dispatch')
@@ -176,19 +420,19 @@ class EmailLoginView(APIView):
         password = request.data.get('password') or ''
 
         if not email or not password:
-            raise AuthenticationFailed('Email és jelszó megadása kötelező.')
+            raise AuthenticationFailed('Email and password are required.')
 
         try:
             user = User.objects.get(email__iexact=email)
         except User.DoesNotExist:
-            raise AuthenticationFailed('Érvénytelen email vagy jelszó.')
+            raise AuthenticationFailed('Invalid email or password.')
 
         if not user.has_usable_password():
-            raise AuthenticationFailed('A felhasználónak nincs beállított jelszava. Használd az Elfelejtetted a jelszavad funkciót.')
+            raise AuthenticationFailed('This account has no password. Use the Forgot password link to set one.')
 
         user = authenticate(request, username=user.username, password=password)
         if user is None:
-            raise AuthenticationFailed('Érvénytelen email vagy jelszó.')
+            raise AuthenticationFailed('Invalid email or password.')
 
         login(request, user)
         return Response(get_current_user_data(user))
@@ -298,6 +542,99 @@ class NoteViewSet(viewsets.ModelViewSet):
         return Response(serializer.data)
 
 
+class TaskViewSet(viewsets.ModelViewSet):
+    serializer_class = TaskSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        queryset = Task.objects.filter(owner=self.request.user)
+        if self.action != 'list':
+            return queryset
+        week = self.request.query_params.get('week')
+        if week:
+            try:
+                week_start = datetime.date.fromisoformat(week)
+            except ValueError:
+                return queryset.none()
+        else:
+            week_start = timezone.localdate()
+        week_end = week_start + datetime.timedelta(days=6)
+        return queryset.filter(Q(due_date__isnull=True) | Q(due_date__lte=week_end))
+
+    def perform_create(self, serializer):
+        serializer.save(owner=self.request.user)
+
+
+class LinkPreviewView(APIView):
+    """Fetch basic Open Graph metadata for a note containing one URL."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        target = request.query_params.get('url', '').strip()
+        parsed = parse.urlparse(target)
+        if parsed.scheme not in ('http', 'https') or not parsed.netloc:
+            return Response({'detail': 'Invalid URL.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if parsed.hostname in ('youtube.com', 'www.youtube.com', 'm.youtube.com', 'youtu.be', 'www.youtu.be'):
+            oembed_url = 'https://www.youtube.com/oembed?' + parse.urlencode({
+                'url': target,
+                'format': 'json',
+            })
+            try:
+                response = url_request.urlopen(
+                    url_request.Request(oembed_url, headers={'User-Agent': 'VisualWorkspace/1.0'}),
+                    timeout=5,
+                )
+                metadata = json.loads(response.read(65536).decode('utf-8'))
+            except (error.URLError, TimeoutError, UnicodeError, ValueError):
+                return Response({'detail': 'Preview unavailable.'}, status=status.HTTP_502_BAD_GATEWAY)
+
+            return Response({
+                'url': target,
+                'title': metadata.get('title', ''),
+                'description': '',
+                'image': metadata.get('thumbnail_url', ''),
+                'domain': parsed.netloc,
+                'favicon': 'https://www.youtube.com/favicon.ico',
+            })
+
+        try:
+            response = url_request.urlopen(
+                url_request.Request(target, headers={'User-Agent': 'VisualWorkspace/1.0'}),
+                timeout=5,
+            )
+            html = response.read(1024 * 1024).decode('utf-8', errors='replace')
+        except (error.URLError, TimeoutError, UnicodeError):
+            return Response({'detail': 'Preview unavailable.'}, status=status.HTTP_502_BAD_GATEWAY)
+
+        def meta(*keys):
+            for key in keys:
+                match = re.search(
+                    rf'<meta[^>]+(?:property|name)=["\']{re.escape(key)}["\'][^>]+content=["\']([^"\']*)',
+                    html,
+                    re.IGNORECASE,
+                )
+                if match:
+                    return match.group(1).strip()
+            return ''
+
+        title_match = re.search(r'<title[^>]*>(.*?)</title>', html, re.IGNORECASE | re.DOTALL)
+        title = meta('og:title', 'twitter:title') or (re.sub(r'\s+', ' ', title_match.group(1)).strip() if title_match else parsed.netloc)
+        description = meta('og:description', 'twitter:description', 'description')
+        image = meta('og:image', 'twitter:image')
+        if image:
+            image = parse.urljoin(target, image)
+
+        return Response({
+            'url': target,
+            'title': title,
+            'description': description,
+            'image': image,
+            'domain': parsed.netloc,
+            'favicon': parse.urljoin(target, '/favicon.ico'),
+        })
+
+
 class FileItemViewSet(viewsets.ModelViewSet):
     """ViewSet for FileItem model with file upload and thumbnail generation."""
     queryset = FileItem.objects.all()
@@ -319,7 +656,8 @@ class FileItemViewSet(viewsets.ModelViewSet):
         """Create a new file item with file upload and thumbnail generation."""
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        instance = serializer.save()
+        self.perform_create(serializer)
+        instance = serializer.instance
 
         # Generate thumbnail for PDF and DOCX files - wrapped in try/except
         # so thumbnail failure never prevents file upload from succeeding

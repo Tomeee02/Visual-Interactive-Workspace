@@ -1,17 +1,17 @@
 <template>
   <div class="login-page">
     <div class="login-card">
-      <h1>Jelszó visszaállítása</h1>
-      <p>Állítsd vissza a jelszavad a kapott link segítségével.</p>
+      <h1>Reset password</h1>
+      <p>Choose a new password using the link you received.</p>
 
       <form class="login-form" @submit.prevent="resetPassword">
         <label>
-          Új jelszó
-          <input v-model="password" type="password" autocomplete="new-password" required />
+          New password
+          <input v-model="password" type="password" autocomplete="new-password" required>
         </label>
 
         <button type="submit" class="primary-button" :disabled="loading">
-          {{ loading ? 'Mentés...' : 'Jelszó visszaállítása' }}
+          {{ loading ? 'Saving...' : 'Reset password' }}
         </button>
       </form>
 
@@ -19,7 +19,7 @@
       <div v-if="error" class="login-error">{{ error }}</div>
 
       <button type="button" class="link-button" @click="goBack">
-        Vissza a bejelentkezéshez
+        Back to sign in
       </button>
     </div>
   </div>
@@ -45,7 +45,7 @@ onMounted(() => {
   token = route.query.token || ''
 
   if (!uid || !token) {
-    error.value = 'A visszaállító link hibás vagy hiányzik. Kérlek, kérj új linket.'
+    error.value = 'The reset link is invalid or missing. Please request a new one.'
   }
 })
 
@@ -54,18 +54,18 @@ async function resetPassword() {
   error.value = null
 
   if (!uid || !token) {
-    error.value = 'A visszaállító link hibás vagy hiányzik.'
+    error.value = 'The reset link is invalid or missing.'
     return
   }
 
   loading.value = true
   try {
     await auth.confirmPasswordReset(uid, token, password.value)
-    message.value = 'A jelszó sikeresen visszaállítva. Most bejelentkezhetsz.'
+    message.value = 'Password reset successfully. You can now sign in.'
     password.value = ''
   } catch (err) {
     console.error('Password reset confirm failed:', err)
-    error.value = err.response?.data?.detail || 'A jelszó visszaállítása sikertelen volt.'
+    error.value = err.response?.data?.detail || 'Could not reset the password.'
   } finally {
     loading.value = false
   }

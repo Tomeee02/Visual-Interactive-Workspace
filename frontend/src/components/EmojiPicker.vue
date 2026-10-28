@@ -16,27 +16,62 @@
         class="emoji-search-input"
         ref="searchInput"
       />
+      <button
+        type="button"
+        class="emoji-add-toggle"
+        title="Add emoji"
+        aria-label="Add emoji"
+        :aria-expanded="showAddEmoji"
+        aria-controls="custom-emoji-form"
+        @click="toggleAddEmoji"
+      >+</button>
     </div>
-    <div class="emoji-grid">
-      <div
-        v-for="item in filteredEmojis"
-        :key="item.emoji"
-        class="emoji-option"
-        @click="selectEmoji(item.emoji)"
-        :title="item.keywords.join(', ')"
-        :class="{ grayscale: selectedBoardGrayscale }"
-      >
-        {{ item.emoji }}
+    <form v-if="showAddEmoji" id="custom-emoji-form" class="emoji-add-form" @submit.prevent="addCustomEmoji" @keydown.esc.stop.prevent="closeAddEmoji">
+      <div class="emoji-add-row">
+        <input
+          v-model="customEmojiInput"
+          ref="customEmojiField"
+          type="text"
+          class="emoji-search-input"
+          placeholder="Paste emoji..."
+          aria-label="New emoji"
+          maxlength="64"
+          :aria-invalid="Boolean(addEmojiError)"
+          :aria-describedby="addEmojiError ? 'custom-emoji-error' : undefined"
+          @input="validateCustomEmojiInput"
+          @paste="pasteCustomEmoji"
+        />
+        <button type="submit" class="emoji-add-action">Add</button>
+        <button type="button" class="emoji-add-action" @click="closeAddEmoji">Cancel</button>
       </div>
+      <p v-if="addEmojiError" id="custom-emoji-error" class="emoji-add-error" role="alert">{{ addEmojiError }}</p>
+    </form>
+    <div class="emoji-grid" ref="emojiGrid">
+      <section v-for="topic in filteredEmojiTopics" :key="topic.name" class="emoji-topic">
+        <h3 class="emoji-topic-title">{{ topic.name }}</h3>
+        <div class="emoji-topic-emojis">
+          <div
+            v-for="item in topic.emojis"
+            :key="item.emoji"
+            class="emoji-option"
+            @click="selectEmoji(item.emoji)"
+            :title="item.keywords.join(', ')"
+            :class="{ grayscale: selectedBoardGrayscale }"
+          >
+            {{ item.emoji }}
+          </div>
+        </div>
+      </section>
     </div>
-    <div v-if="filteredEmojis.length === 0" class="no-results">
+    <div v-if="filteredEmojiTopics.length === 0" class="no-results">
       No emojis found
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, nextTick } from 'vue'
+import emojiRegex from 'emoji-regex'
 import { useWorkspaceStore } from '../store/workspace'
 
 const emit = defineEmits(['select', 'close'])
@@ -44,6 +79,90 @@ const store = useWorkspaceStore()
 
 const searchQuery = ref('')
 const searchInput = ref(null)
+const emojiGrid = ref(null)
+const showAddEmoji = ref(false)
+const customEmojiInput = ref('')
+const customEmojiField = ref(null)
+const addEmojiError = ref('')
+const customEmojiStorageKey = 'workspace-custom-emojis'
+const customEmojis = ref(loadCustomEmojis())
+
+function isSingleEmoji(value) {
+  if (typeof value !== 'string' || !value || value.length > 64) {
+    return false
+  }
+  const matches = Array.from(value.matchAll(emojiRegex()))
+  return matches.length === 1 && matches[0][0] === value
+}
+
+function validateCustomEmojiInput() {
+  const emoji = customEmojiInput.value.trim()
+  addEmojiError.value = emoji && !isSingleEmoji(emoji) ? 'Paste a single emoji.' : ''
+}
+
+function pasteCustomEmoji(event) {
+  event.preventDefault()
+  const emoji = event.clipboardData?.getData('text/plain').trim() || ''
+  if (!isSingleEmoji(emoji)) {
+    addEmojiError.value = 'Paste a single emoji.'
+    return
+  }
+  customEmojiInput.value = emoji
+  addEmojiError.value = ''
+}
+
+function loadCustomEmojis() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(customEmojiStorageKey) || '[]')
+    return Array.isArray(saved)
+      ? [...new Set(saved.filter(value => typeof value === 'string' && isSingleEmoji(value)))]
+      : []
+  } catch {
+    return []
+  }
+}
+
+async function toggleAddEmoji() {
+  if (showAddEmoji.value) {
+    closeAddEmoji()
+    return
+  }
+  showAddEmoji.value = true
+  await nextTick()
+  customEmojiField.value?.focus()
+}
+
+function closeAddEmoji() {
+  showAddEmoji.value = false
+  customEmojiInput.value = ''
+  addEmojiError.value = ''
+  searchInput.value?.focus()
+}
+
+async function addCustomEmoji() {
+  const emoji = customEmojiInput.value.trim()
+  if (!isSingleEmoji(emoji)) {
+    addEmojiError.value = 'Paste a single emoji.'
+    return
+  }
+  const normalizedEmoji = emoji.replace(/\uFE0F/g, '')
+  if ([...emojiData.map(item => item.emoji), ...customEmojis.value].some(value => value.replace(/\uFE0F/g, '') === normalizedEmoji)) {
+    addEmojiError.value = 'This emoji is already in the picker.'
+    return
+  }
+  const updated = [...customEmojis.value, emoji]
+  try {
+    localStorage.setItem(customEmojiStorageKey, JSON.stringify(updated))
+  } catch {
+    addEmojiError.value = 'Could not save the emoji. Check browser storage permissions.'
+    return
+  }
+  customEmojis.value = updated
+  searchQuery.value = ''
+  closeAddEmoji()
+  await nextTick()
+  emojiGrid.value?.scrollTo({ top: emojiGrid.value.scrollHeight })
+}
 
 onMounted(() => {
   searchInput.value?.focus()
@@ -63,11 +182,18 @@ function toggleGrayscale() {
 
 const emojiData = [
   { "emoji": "📋", "keywords": ["clipboard", "list", "task", "todo", "board"] },
+  { "emoji": "☑️", "keywords": ["checkbox", "checklist", "task", "todo", "done"] },
+  { "emoji": "🔔", "keywords": ["bell", "reminder", "notification", "alert"] },
+  { "emoji": "📣", "keywords": ["announcement", "megaphone", "team", "news"] },
+  { "emoji": "📥", "keywords": ["inbox", "incoming", "download", "receive"] },
+  { "emoji": "📤", "keywords": ["outbox", "outgoing", "upload", "send"] },
+  { "emoji": "👥", "keywords": ["team", "people", "group", "collaboration"] },
+  { "emoji": "🧑‍🤝‍🧑", "keywords": ["teamwork", "collaboration", "people", "partnership"] },
   { "emoji": "📁", "keywords": ["folder", "file", "directory", "documents"] },
   { "emoji": "📂", "keywords": ["folder", "open", "file", "directory"] },
   { "emoji": "📄", "keywords": ["document", "page", "paper", "file"] },
   { "emoji": "📝", "keywords": ["memo", "note", "write", "edit", "pencil"] },
-  { "emoji": "📊", "keywords": ["chart", "graph", "statistics", "data", "analytics"] },
+  { "emoji": "📊", "keywords": ["chart", "graph", "statistics", "data", "analytics", "presentation", "research", "project"] },
   { "emoji": "📈", "keywords": ["chart", "graph", "growth", "increase", "up"] },
   { "emoji": "📉", "keywords": ["chart", "graph", "decline", "decrease", "down"] },
   { "emoji": "🗂️", "keywords": ["dividers", "organize", "tabs", "files"] },
@@ -334,6 +460,7 @@ const emojiData = [
   { "emoji": "💎", "keywords": ["diamond", "gem", "jewel", "precious", "value"] },
   { "emoji": "💰", "keywords": ["money", "bag", "cash", "dollar", "rich"] },
   { "emoji": "💵", "keywords": ["dollar", "money", "bill", "cash"] },
+  { "emoji": "💸", "keywords": ["money", "cash", "expense", "spending", "payment"] },
   { "emoji": "💳", "keywords": ["card", "credit", "payment", "bank"] },
   { "emoji": "🎁", "keywords": ["gift", "present", "birthday", "wrapped"] },
   { "emoji": "🎀", "keywords": ["ribbon", "bow", "gift", "decoration"] },
@@ -366,6 +493,7 @@ const emojiData = [
   { "emoji": "🧑‍💻", "keywords": ["developer", "coding", "programmer", "tech"] },
   { "emoji": "🧑‍🔬", "keywords": ["scientist", "lab", "research", "experiment"] },
   { "emoji": "🧑‍🏫", "keywords": ["teacher", "education", "learning", "mentor"] },
+  { "emoji": "🧑‍💼", "keywords": ["office worker", "business", "professional", "work"] },
 
   { "emoji": "🌍", "keywords": ["world", "global", "international", "future"] },
   { "emoji": "🌱", "keywords": ["sustainability", "eco", "green", "future"] },
@@ -399,8 +527,6 @@ const emojiData = [
   { "emoji": "🧑‍🎓", "keywords": ["student", "university", "graduation", "learning"] },
   { "emoji": "🧠", "keywords": ["brain", "thinking", "knowledge", "learning"] },
 
-  { "emoji": "📊", "keywords": ["presentation", "research", "data", "project"] },
-
   { "emoji": "🪖", "keywords": ["helmet", "tactical", "gear", "protection"] },
   { "emoji": "🚧", "keywords": ["construction", "barrier", "warning", "work zone"] },
   { "emoji": "🧱", "keywords": ["brick", "construction", "building", "material"] },
@@ -413,7 +539,6 @@ const emojiData = [
   { "emoji": "⛺", "keywords": ["camping", "outdoor", "adventure", "nature"] },
   { "emoji": "🗜️", "keywords": ["clamp", "pressure", "tool", "mechanics"] },
   { "emoji": "🪵", "keywords": ["wood", "nature", "material", "outdoor"] },
-  { "emoji": "🪨", "keywords": ["rock", "boulder", "climbing", "nature"] },
   { "emoji": "🎒", "keywords": ["backpack", "gear", "travel", "outdoor"] },
   { "emoji": "🪄", "keywords": ["magic", "effect", "creativity", "spark"] },
   { "emoji": "🪅", "keywords": ["piñata", "celebration", "fun", "party"] },
@@ -442,14 +567,49 @@ const emojiData = [
   { "emoji": "💌", "keywords": ["love letter", "message", "mail", "romance"] }
 ]
 
-const filteredEmojis = computed(() => {
-  if (!searchQuery.value.trim()) {
-    return emojiData
+const emojiTopicStarts = [
+  { emoji: "📋", name: "Planning & teamwork" },
+  { emoji: "🎯", name: "Creativity & places" },
+  { emoji: "💡", name: "Tools & technology" },
+  { emoji: "🌟", name: "Symbols & favorites" },
+  { emoji: "🌈", name: "Weather & nature" },
+  { emoji: "🐶", name: "Animals & farming" },
+  { emoji: "☕", name: "Food & drink" },
+  { emoji: "😀", name: "People & moods" },
+  { emoji: "🚀", name: "Travel & sports" },
+  { emoji: "⏰", name: "Time & money" },
+  { emoji: "💊", name: "Health & science" },
+  { emoji: "🏷️", name: "Everyday life & interests" },
+  { emoji: "🪖", name: "Tools, home & hobbies" }
+]
+
+const emojiTopicByStart = new Map(emojiTopicStarts.map(({ emoji, name }) => [emoji, name]))
+let activeEmojiTopic = emojiTopicStarts[0].name
+const categorizedEmojis = emojiData.map(item => {
+  activeEmojiTopic = emojiTopicByStart.get(item.emoji) || activeEmojiTopic
+  return { ...item, topic: activeEmojiTopic }
+})
+
+const filteredEmojiTopics = computed(() => {
+  const query = searchQuery.value.trim().toLowerCase()
+  const topics = new Map()
+
+  const allEmojis = [
+    ...categorizedEmojis,
+    ...customEmojis.value.map(emoji => ({ emoji, keywords: ['custom', 'others', emoji], topic: 'Others' }))
+  ]
+
+  for (const item of allEmojis) {
+    if (query && !item.emoji.includes(query) && !item.keywords.some(keyword => keyword.includes(query))) {
+      continue
+    }
+    if (!topics.has(item.topic)) {
+      topics.set(item.topic, [])
+    }
+    topics.get(item.topic).push(item)
   }
-  const query = searchQuery.value.toLowerCase().trim()
-  return emojiData.filter(item => 
-    item.keywords.some(keyword => keyword.includes(query))
-  )
+
+  return Array.from(topics, ([name, emojis]) => ({ name, emojis }))
 })
 
 function selectEmoji(emoji) {
@@ -465,7 +625,8 @@ function selectEmoji(emoji) {
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
   padding: 12px;
   z-index: 1000;
-  width: 350px;
+  width: 380px;
+  max-width: calc(100vw - 24px);
 }
 
 .emoji-picker-header {
@@ -526,7 +687,66 @@ function selectEmoji(emoji) {
 }
 
 .emoji-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   margin-bottom: 10px;
+}
+
+.emoji-search > .emoji-search-input,
+.emoji-add-row > .emoji-search-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.emoji-add-toggle,
+.emoji-add-action {
+  flex-shrink: 0;
+  border: 1px solid #E5E7EB;
+  border-radius: 6px;
+  background: #F9FAFB;
+  color: #4B5563;
+  cursor: pointer;
+}
+
+.emoji-add-toggle {
+  width: 36px;
+  height: 36px;
+  font-size: 24px;
+  line-height: 1;
+}
+
+.emoji-add-action {
+  height: 36px;
+  padding: 0 8px;
+  font-size: 12px;
+}
+
+.emoji-add-toggle:hover,
+.emoji-add-action:hover {
+  background: #F3F4F6;
+}
+
+.emoji-add-toggle:focus-visible,
+.emoji-add-action:focus-visible {
+  outline: 2px solid #1687D2;
+  outline-offset: 2px;
+}
+
+.emoji-add-form {
+  margin-bottom: 10px;
+}
+
+.emoji-add-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.emoji-add-error {
+  margin: 6px 0 0;
+  color: #DC2626;
+  font-size: 12px;
 }
 
 .emoji-search-input {
@@ -548,15 +768,35 @@ function selectEmoji(emoji) {
 }
 
 .emoji-grid {
-  display: grid;
-  grid-template-columns: repeat(8, 1fr);
-  gap: 4px;
+  display: block;
   max-height: 280px;
   overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.emoji-topic + .emoji-topic {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid #E5E7EB;
+}
+
+.emoji-topic-title {
+  margin: 0 2px 4px;
+  color: #6B7280;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.emoji-topic-emojis {
+  display: grid;
+  grid-template-columns: repeat(8, minmax(0, 1fr));
+  gap: 4px;
 }
 
 .emoji-option {
-  width: 36px;
+  width: 100%;
+  min-width: 0;
   height: 36px;
   display: flex;
   align-items: center;
@@ -582,5 +822,60 @@ function selectEmoji(emoji) {
   color: #9CA3AF;
   padding: 20px;
   font-size: 14px;
+}
+
+:global([data-theme='dark'] .emoji-picker) {
+  background: #1B232B;
+  border-color: #34424D;
+  color: #E5EDF2;
+}
+
+:global([data-theme='dark'] .emoji-picker-header),
+:global([data-theme='dark'] .emoji-topic-title),
+:global([data-theme='dark'] .toggle-label),
+:global([data-theme='dark'] .no-results) {
+  color: #A7B4BF;
+}
+
+:global([data-theme='dark'] .emoji-topic + .emoji-topic) {
+  border-color: #34424D;
+}
+
+:global([data-theme='dark'] .toggle-slider) {
+  background: #52616D;
+}
+
+:global([data-theme='dark'] .grayscale-toggle input:checked + .toggle-slider) {
+  background: #1687D2;
+}
+
+:global([data-theme='dark'] .emoji-search-input),
+:global([data-theme='dark'] .emoji-add-toggle),
+:global([data-theme='dark'] .emoji-add-action) {
+  background: #202B34;
+  border-color: #34424D;
+  color: #E5EDF2;
+}
+
+:global([data-theme='dark'] .emoji-search-input:focus) {
+  border-color: #1687D2;
+}
+
+:global([data-theme='dark'] .emoji-search-input::placeholder) {
+  color: #7F919E;
+}
+
+:global([data-theme='dark'] .emoji-option:hover),
+:global([data-theme='dark'] .emoji-add-toggle:hover),
+:global([data-theme='dark'] .emoji-add-action:hover) {
+  background-color: #293E4D;
+}
+
+:global([data-theme='dark'] .emoji-add-error) {
+  color: #FCA5A5;
+}
+
+:global([data-theme='dark'] .emoji-grid) {
+  scrollbar-color: #52616D #202B34;
 }
 </style>

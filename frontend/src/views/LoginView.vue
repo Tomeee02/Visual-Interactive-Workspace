@@ -1,37 +1,30 @@
 <template>
   <div class="login-page">
     <div class="login-card">
-      <h1>Bejelentkezés</h1>
-      <p>Jelentkezz be email/jelszóval vagy Google fiókkal.</p>
+      <h1>Sign in</h1>
+      <p>Sign in with your email and password.</p>
 
       <form class="login-form" @submit.prevent="handleEmailLogin">
         <label>
           Email
-          <input v-model="email" type="email" autocomplete="email" required />
+          <input v-model="email" type="email" autocomplete="email" required>
         </label>
 
         <label>
-          Jelszó
-          <input v-model="password" type="password" autocomplete="current-password" required />
+          Password
+          <input v-model="password" type="password" autocomplete="current-password" required>
         </label>
 
         <button type="submit" class="primary-button" :disabled="loading">
-          {{ loading ? 'Bejelentkezés...' : 'Bejelentkezés' }}
+          {{ loading ? 'Signing in...' : 'Sign in' }}
         </button>
       </form>
 
       <button type="button" class="link-button" @click="goToForgotPassword">
-        Elfelejtetted a jelszavad?
+        Forgot your password?
       </button>
 
-      <div class="divider"><span>vagy</span></div>
-
-      <div id="google-button" class="google-button"></div>
-
       <div v-if="error" class="login-error">{{ error }}</div>
-      <div v-if="!clientId" class="login-help">
-        A Google kliensazonosító nincs beállítva. Add hozzá a `VITE_GOOGLE_CLIENT_ID` környezeti változót.
-      </div>
     </div>
   </div>
 </template>
@@ -47,7 +40,6 @@ const email = ref('')
 const password = ref('')
 const error = ref(null)
 const loading = ref(false)
-const clientId = import.meta.env.VITE_GOOGLE_CLIENT_ID
 
 async function handleEmailLogin() {
   error.value = null
@@ -58,7 +50,7 @@ async function handleEmailLogin() {
     router.push('/board/root')
   } catch (err) {
     console.error('Email login error:', err)
-    error.value = err.response?.data?.detail || 'Email bejelentkezés sikertelen.'
+    error.value = err.response?.data?.detail || 'Email sign-in failed.'
   } finally {
     loading.value = false
   }
@@ -68,49 +60,6 @@ function goToForgotPassword() {
   router.push({ name: 'ForgotPassword' })
 }
 
-function handleGoogleCredential(response) {
-  console.log('Google credential response:', response)
-
-  if (!response?.credential) {
-    error.value = 'Google bejelentkezés sikertelen.'
-    return
-  }
-
-  auth.loginWithGoogle(response.credential)
-    .then(() => {
-      router.push('/board/root')
-    })
-    .catch((err) => {
-      console.error('Login error:', err)
-      error.value = err.response?.data?.detail || 'Google bejelentkezés sikertelen.'
-    })
-}
-
-function initGoogle() {
-  if (!window.google?.accounts?.id) {
-    error.value = 'Google SDK nem töltődött be.'
-    return
-  }
-
-  window.google.accounts.id.initialize({
-    client_id: clientId,
-    callback: handleGoogleCredential,
-    ux_mode: 'popup',
-  })
-
-  window.google.accounts.id.renderButton(
-    document.getElementById('google-button'),
-    {
-      theme: 'outline',
-      size: 'large',
-      width: 320,
-      text: 'signin_with',
-    }
-  )
-
-  window.google.accounts.id.prompt()
-}
-
 onMounted(async () => {
   if (!auth.isLoaded) {
     await auth.loadUser()
@@ -118,29 +67,7 @@ onMounted(async () => {
 
   if (auth.user) {
     router.push('/board/root')
-    return
   }
-
-  if (!clientId) {
-    return
-  }
-
-  if (document.getElementById('google-sdk-script')) {
-    initGoogle()
-    return
-  }
-
-  const script = document.createElement('script')
-  script.id = 'google-sdk-script'
-  script.src = 'https://accounts.google.com/gsi/client'
-  script.async = true
-  script.defer = true
-  script.onload = initGoogle
-  script.onerror = () => {
-    error.value = 'Google SDK nem töltődött be.'
-  }
-
-  document.head.appendChild(script)
 })
 </script>
 
@@ -222,26 +149,9 @@ onMounted(async () => {
   margin-top: 8px;
 }
 
-.divider {
-  margin: 24px 0;
-  text-align: center;
-  color: #6b7280;
-}
-
-.divider span {
-  background: white;
-  padding: 0 12px;
-}
-
-.login-error,
-.login-help {
+.login-error {
   margin-top: 18px;
   color: #dc2626;
   font-size: 14px;
-}
-
-.google-button {
-  display: flex;
-  justify-content: center;
 }
 </style>

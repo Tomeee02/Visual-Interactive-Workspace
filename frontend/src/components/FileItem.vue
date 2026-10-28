@@ -6,7 +6,7 @@
     :class="{
       selected,
       dragging: isDragging,
-      'has-thumbnail': !!file.thumbnailUrl || (isImage && file.fileUrl),
+      'has-thumbnail': previewVisible,
       'upload-error': file.uploadError
     }"
     :style="{
@@ -14,9 +14,10 @@
       top: file.y + 'px'
     }"
     @mousedown.stop="handleMouseDown"
+    @dblclick.stop="handleOpen"
   >
     <!-- Image preview (for image files) -->
-    <div v-if="isImage && file.fileUrl" class="image-preview-container">
+    <div v-if="previewVisible && isImage" class="image-preview-container">
       <img
         :src="file.fileUrl"
         :alt="file.filename"
@@ -28,7 +29,7 @@
     </div>
 
     <!-- Thumbnail preview (for PDF/DOCX) -->
-    <div v-else-if="file.thumbnailUrl" class="thumbnail-container">
+    <div v-else-if="previewVisible" class="thumbnail-container">
       <img
         :src="file.thumbnailUrl"
         :alt="file.filename"
@@ -47,11 +48,10 @@
           <div class="file-info-size">{{ formattedSize }}</div>
         </div>
         <div class="file-info-actions">
-          <a
+          <button
             v-if="file.fileUrl"
             class="file-action-btn"
-            :href="file.fileUrl"
-            target="_blank"
+            @click.stop="handleOpen"
             @mousedown.stop
             title="Megnyitás"
           >
@@ -60,7 +60,7 @@
               <polyline points="15 3 21 3 21 9" />
               <line x1="10" y1="14" x2="21" y2="3" />
             </svg>
-          </a>
+          </button>
           <button
             v-if="file.fileUrl"
             class="file-action-btn"
@@ -119,7 +119,7 @@
     </div>
 
     <!-- File name and size for non-thumbnail, non-image files (icon files only) -->
-    <template v-if="!file.thumbnailUrl && !isImage">
+    <template v-if="!previewVisible">
       <div class="file-name" :title="file.filename">{{ truncatedName }}</div>
       <div v-if="file.uploadError" class="file-error-text">Upload failed</div>
       <div v-else class="file-size">{{ formattedSize }}</div>
@@ -127,7 +127,7 @@
 
     <!-- Download button for non-thumbnail files (icons only, not images) -->
     <button
-      v-if="file.fileUrl && !file.thumbnailUrl && !isImage"
+      v-if="file.fileUrl && !previewVisible"
       class="file-download"
       @click.stop="handleDownload"
       @mousedown.stop
@@ -140,10 +140,55 @@
       </svg>
     </button>
   </div>
+
+  <Teleport to="body">
+    <div
+      v-if="isPreviewOpen"
+      ref="previewDialogRef"
+      class="document-preview-backdrop"
+      role="dialog"
+      aria-modal="true"
+      :aria-label="file.filename"
+      tabindex="-1"
+      @click.self="closePreview"
+      @keydown.esc="closePreview"
+    >
+      <div class="document-preview-dialog">
+        <header class="document-preview-header">
+          <div class="document-preview-title" :title="file.filename">{{ file.filename }}</div>
+          <button class="document-preview-close" type="button" title="Bezárás" aria-label="Bezárás" @click="closePreview">
+            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+              <path d="M18 6 6 18M6 6l12 12" />
+            </svg>
+          </button>
+        </header>
+        <div ref="previewContentRef" class="document-preview-content">
+          <div v-if="isPdf && pdfPageCount" class="document-preview-pdf">
+            <canvas
+              v-for="pageNumber in pdfPageCount"
+              :key="pageNumber"
+              class="document-preview-page"
+            />
+          </div>
+          <div v-else-if="previewLoading" class="document-preview-status">Dokumentum betöltése...</div>
+          <img
+            v-else-if="previewImageUrl"
+            class="document-preview-image"
+            :src="previewImageUrl"
+            :alt="file.filename"
+          />
+          <div v-else class="document-preview-unavailable">{{ previewError || 'Ehhez a fájlhoz nem érhető el előnézet.' }}</div>
+        </div>
+      </div>
+    </div>
+  </Teleport>
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, nextTick, onUnmounted } from 'vue'
+import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
+
+let pdfjs = null
 
 const props = defineProps({
   file: {
@@ -159,6 +204,13 @@ const props = defineProps({
 const emit = defineEmits(['select', 'drag-start', 'drag', 'drag-end'])
 
 const isDragging = ref(false)
+const isPreviewOpen = ref(false)
+const previewDialogRef = ref(null)
+const previewContentRef = ref(null)
+const pdfPageCount = ref(0)
+const previewLoading = ref(false)
+const previewError = ref('')
+let pdfDocument = null
 
 const fileExtension = computed(() => {
   if (!props.file?.filename) return ''
@@ -169,6 +221,46 @@ const fileExtension = computed(() => {
 const isImage = computed(() => {
   const ext = fileExtension.value.toLowerCase()
   return ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp', 'ico', 'tiff', 'tif', 'avif'].includes(ext)
+})
+
+const isPdf = computed(() => fileExtension.value.toLowerCase() === 'pdf')
+
+const previewImageUrl = computed(() => {
+  if (isImage.value) return props.file.fileUrl
+  return props.file.thumbnailUrl
+})
+
+async function renderPdfPages() {
+  pdfPageCount.value = pdfDocument.numPages
+  await nextTick()
+
+  const pdfCanvases = previewContentRef.value.querySelectorAll('.document-preview-page')
+  const availableWidth = Math.max(280, previewContentRef.value.clientWidth - 48)
+  for (let pageNumber = 1; pageNumber <= pdfDocument.numPages; pageNumber++) {
+    const page = await pdfDocument.getPage(pageNumber)
+    const baseViewport = page.getViewport({ scale: 1 })
+    const scale = Math.min(1.5, availableWidth / baseViewport.width)
+    const viewport = page.getViewport({ scale })
+    const canvas = pdfCanvases[pageNumber - 1]
+    if (!canvas) continue
+    const context = canvas.getContext('2d')
+    const pixelRatio = window.devicePixelRatio || 1
+    canvas.width = Math.floor(viewport.width * pixelRatio)
+    canvas.height = Math.floor(viewport.height * pixelRatio)
+    canvas.style.width = `${Math.floor(viewport.width)}px`
+    canvas.style.height = `${Math.floor(viewport.height)}px`
+    await page.render({
+      canvasContext: context,
+      viewport,
+      transform: pixelRatio === 1 ? null : [pixelRatio, 0, 0, pixelRatio, 0, 0]
+    }).promise
+  }
+  previewContentRef.value.scrollTop = 0
+}
+
+const previewVisible = computed(() => {
+  const hasPreview = !!props.file.thumbnailUrl || (isImage.value && !!props.file.fileUrl)
+  return hasPreview && props.file.showPreview !== false
 })
 
 const iconColor = computed(() => {
@@ -229,6 +321,47 @@ async function handleDownload() {
     window.open(props.file.fileUrl, '_blank')
   }
 }
+
+async function handleOpen() {
+  if (!props.file?.fileUrl) return
+  isPreviewOpen.value = true
+  previewError.value = ''
+  await nextTick()
+  previewDialogRef.value?.focus()
+
+  if (isPdf.value && !pdfDocument) {
+    previewLoading.value = true
+    try {
+      if (!pdfjs) {
+        pdfjs = await import('pdfjs-dist')
+        pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerUrl
+      }
+      const response = await fetch(props.file.fileUrl)
+      if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      pdfDocument = await pdfjs.getDocument({ data: await response.arrayBuffer() }).promise
+    } catch (error) {
+      console.error('Document preview failed:', error)
+      previewError.value = 'A dokumentum előnézete nem tölthető be.'
+      pdfPageCount.value = 0
+    } finally {
+      previewLoading.value = false
+    }
+  }
+
+  if (isPdf.value && pdfDocument) {
+    await renderPdfPages()
+  }
+}
+
+function closePreview() {
+  isPreviewOpen.value = false
+}
+
+onUnmounted(() => {
+  if (typeof pdfDocument?.destroy === 'function') {
+    pdfDocument.destroy()
+  }
+})
 
 function handleMouseDown(e) {
   emit('select', e)
@@ -332,7 +465,7 @@ function handleMouseDown(e) {
 .thumbnail-image {
   width: 100%;
   height: calc(100% - 50px);
-  object-fit: cover;
+  object-fit: contain;
   object-position: top;
   display: block;
 }
@@ -513,5 +646,125 @@ function handleMouseDown(e) {
 .file-action-btn:hover {
   background: #F3F4F6;
   color: #1F2937;
+}
+
+.document-preview-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 3000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px;
+  background: rgba(17, 24, 39, 0.58);
+}
+
+.document-preview-dialog {
+  width: min(900px, 88vw);
+  height: min(760px, 86vh);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid #D1D5DB;
+  border-radius: 8px;
+  background: #FFFFFF;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.28);
+}
+
+.document-preview-header {
+  height: 52px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+  padding: 0 12px 0 18px;
+  border-bottom: 1px solid #E5E7EB;
+}
+
+.document-preview-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: #1F2937;
+  font-size: 14px;
+  font-weight: 600;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.document-preview-close {
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #6B7280;
+  cursor: pointer;
+}
+
+.document-preview-close:hover {
+  background: #F3F4F6;
+  color: #111827;
+}
+
+.document-preview-content {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: auto;
+  background: #F3F4F6;
+}
+
+.document-preview-pdf {
+  width: 100%;
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 18px;
+  padding: 24px;
+  flex-shrink: 0;
+  align-self: flex-start;
+}
+
+.document-preview-page {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  background: #FFFFFF;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.18);
+}
+
+.document-preview-image {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+
+.document-preview-status,
+.document-preview-unavailable {
+  padding: 24px;
+  color: #6B7280;
+  font-size: 14px;
+}
+
+@media (max-width: 640px) {
+  .document-preview-backdrop {
+    padding: 12px;
+  }
+
+  .document-preview-dialog {
+    width: 100%;
+    height: 88vh;
+  }
 }
 </style>

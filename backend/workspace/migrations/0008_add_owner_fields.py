@@ -1,4 +1,5 @@
 from django.db import migrations, models
+from django.contrib.auth.hashers import make_password
 
 
 def create_admin_and_assign_owner(apps, schema_editor):
@@ -18,7 +19,7 @@ def create_admin_and_assign_owner(apps, schema_editor):
     )
 
     if created:
-        user.set_unusable_password()
+        user.password = make_password(None)
         user.save()
     else:
         if not user.is_staff or not user.is_superuser or user.email != admin_email:

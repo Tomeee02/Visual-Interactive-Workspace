@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import axios from 'axios'
+import { useVaultStore } from './vault'
 
 const authApi = axios.create({
   baseURL: '/api/auth/',
@@ -53,6 +54,7 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   async function logout() {
+    useVaultStore().lock()
     try {
       await authApi.post('logout/')
     } catch (err) {

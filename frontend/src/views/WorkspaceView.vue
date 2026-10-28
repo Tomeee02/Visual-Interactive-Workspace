@@ -5,6 +5,7 @@
       <Toolbar />
       <Canvas />
       <StagingSidebar />
+      <BoardTemplateChooser v-if="store.templateChooserBoardId === store.currentBoardId" />
     </div>
   </div>
 </template>
@@ -17,6 +18,7 @@ import TopBar from '../components/TopBar.vue'
 import Toolbar from '../components/Toolbar.vue'
 import Canvas from '../components/Canvas.vue'
 import StagingSidebar from '../components/StagingSidebar.vue'
+import BoardTemplateChooser from '../components/BoardTemplateChooser.vue'
 
 const route = useRoute()
 const store = useWorkspaceStore()
@@ -26,6 +28,7 @@ async function initBoard(boardId) {
   // Load ancestor boards for breadcrumb navigation (when directly opening a board URL)
   await store.loadBoardAncestors(boardId)
   await store.loadBoardData(boardId)
+  store.showTemplateChooserForNewBoard(boardId)
 }
 
 onMounted(() => {
@@ -53,5 +56,6 @@ watch(() => route.params.id, (newId) => {
   flex: 1;
   display: flex;
   overflow: hidden;
+  position: relative;
 }
 </style>

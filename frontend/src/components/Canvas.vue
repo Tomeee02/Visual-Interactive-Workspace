@@ -26,7 +26,7 @@
     </div>
 
     <!-- Empty state -->
-    <div v-if="store.currentBoard.items.length === 0 && !isDragOver" class="empty-state">
+    <div v-if="(store.currentBoard?.items || []).length === 0 && !isDragOver" class="empty-state">
       <img :src="emptyStateImage" alt="Empty workspace" />
       <h2>Empty Board</h2>
       <p>Create notes or boards to get started, or drag files here</p>
@@ -40,6 +40,28 @@
       :selected="store.selectedItems.has(noteId)"
       @select="handleItemSelect(noteId, $event)"
       @drag-start="handleDragStart(noteId, $event)"
+      @drag="handleDrag"
+      @drag-end="handleDragEnd"
+    />
+
+    <Checklist
+      v-for="checklistId in checklistIds"
+      :key="checklistId"
+      :checklist="store.notes[checklistId]"
+      :selected="store.selectedItems.has(checklistId)"
+      @select="handleItemSelect(checklistId, $event)"
+      @drag-start="handleDragStart(checklistId, $event)"
+      @drag="handleDrag"
+      @drag-end="handleDragEnd"
+    />
+
+    <Table
+      v-for="tableId in tableIds"
+      :key="tableId"
+      :table="store.notes[tableId]"
+      :selected="store.selectedItems.has(tableId)"
+      @select="handleItemSelect(tableId, $event)"
+      @drag-start="handleDragStart(tableId, $event)"
       @drag="handleDrag"
       @drag-end="handleDragEnd"
     />
@@ -89,6 +111,8 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useWorkspaceStore } from '../store/workspace'
 import Note from './Note.vue'
+import Checklist from './Checklist.vue'
+import Table from './Table.vue'
 import Board from './Board.vue'
 import FileItem from './FileItem.vue'
 
@@ -102,6 +126,7 @@ const emptyStateImage = 'https://mgx-backend-cdn.metadl.com/generate/images/9010
 const isDragOver = ref(false)
 const isFileDragOver = ref(false)
 let dragOverTimeout = null
+const lastDragPoint = ref(null)
 
 // Item drop-onto-board state
 const dropTargetBoardId = ref(null)
@@ -111,15 +136,23 @@ const scrollX = ref(0)
 const scrollY = ref(0)
 
 const noteIds = computed(() => {
-  return store.currentBoard.items.filter(id => store.notes[id])
+  return (store.currentBoard?.items || []).filter(id => store.notes[id] && store.notes[id].type === 'note' && !['checklist', 'table'].includes(store.notes[id].itemType))
+})
+
+const checklistIds = computed(() => {
+  return (store.currentBoard?.items || []).filter(id => store.notes[id] && store.notes[id].itemType === 'checklist')
+})
+
+const tableIds = computed(() => {
+  return (store.currentBoard?.items || []).filter(id => store.notes[id] && store.notes[id].itemType === 'table')
 })
 
 const boardIds = computed(() => {
-  return store.currentBoard.items.filter(id => store.boards[id])
+  return (store.currentBoard?.items || []).filter(id => store.boards[id])
 })
 
 const fileIds = computed(() => {
-  return store.currentBoard.items.filter(id => store.files[id])
+  return (store.currentBoard?.items || []).filter(id => store.files[id])
 })
 
 // Drag state
@@ -129,6 +162,7 @@ const draggedItemId = ref(null)
 const dragMouseStart = ref({ x: 0, y: 0 })
 // Store the original positions of all selected items at drag start
 const dragItemStartPositions = ref(new Map())
+const dragUndoSnapshot = ref(null)
 
 // Minimum drag distance (in pixels) before considering it a real drag
 const DRAG_THRESHOLD = 3
@@ -136,6 +170,13 @@ const DRAG_THRESHOLD = 3
 // Lasso state
 const isLassoing = ref(false)
 const lassoStart = ref({ x: 0, y: 0 })
+
+function getCanvasPoint(e, rect = canvasRef.value.getBoundingClientRect()) {
+  return {
+    x: e.clientX - rect.left + canvasRef.value.scrollLeft,
+    y: e.clientY - rect.top + canvasRef.value.scrollTop
+  }
+}
 
 function handleCanvasMouseDown(e) {
   if (e.button !== 0) return // Only left click
@@ -147,8 +188,7 @@ function handleCanvasMouseDown(e) {
   }
 
   const rect = canvasRef.value.getBoundingClientRect()
-  const x = e.clientX - rect.left
-  const y = e.clientY - rect.top
+  const { x, y } = getCanvasPoint(e, rect)
 
   // Start lasso selection
   isLassoing.value = true
@@ -161,8 +201,7 @@ function handleCanvasMouseMove(e) {
   if (!isLassoing.value || isDragging.value) return
 
   const canvasRect = canvasRef.value.getBoundingClientRect()
-  const x = e.clientX - canvasRect.left
-  const y = e.clientY - canvasRect.top
+  const { x, y } = getCanvasPoint(e, canvasRect)
 
   const lassoRect = {
     x: Math.min(lassoStart.value.x, x),
@@ -188,8 +227,8 @@ function selectItemsByDOM(lassoRect, canvasRect) {
     
     // Convert element rect to canvas-relative coordinates
     const itemRect = {
-      x: elRect.left - canvasRect.left,
-      y: elRect.top - canvasRect.top,
+      x: elRect.left - canvasRect.left + canvasRef.value.scrollLeft,
+      y: elRect.top - canvasRect.top + canvasRef.value.scrollTop,
       width: elRect.width,
       height: elRect.height
     }
@@ -253,6 +292,7 @@ function handleDragStart(itemId, event) {
   // Record original positions of ALL selected items
   dragItemStartPositions.value = new Map()
   const selectedIds = Array.from(store.selectedItems)
+  dragUndoSnapshot.value = store.captureUndoSnapshot(selectedIds)
   selectedIds.forEach(id => {
     const item = store.notes[id] || store.boards[id] || store.files[id]
     if (item) {
@@ -334,6 +374,7 @@ function handleDragEnd() {
   } else if (hasDragged.value) {
     // Only save positions if the user actually dragged (not just clicked)
     const selectedIds = Array.from(store.selectedItems)
+    const movedTable = store.notes[draggedItemId.value]?.itemType === 'table'
     selectedIds.forEach(id => {
       const item = store.notes[id] || store.boards[id] || store.files[id]
       if (item) {
@@ -359,12 +400,18 @@ function handleDragEnd() {
         }
       }
     })
+    if (movedTable) {
+      store.clearSelection()
+    }
   }
+
+  if (dragUndoSnapshot.value) store.commitUndoSnapshot(dragUndoSnapshot.value)
 
   isDragging.value = false
   hasDragged.value = false
   draggedItemId.value = null
   dragItemStartPositions.value.clear()
+  dragUndoSnapshot.value = null
   dropTargetBoardId.value = null
 }
 
@@ -374,6 +421,10 @@ function handleBoardOpen(boardId) {
 
 // File drag-and-drop handlers
 function handleDragOver(e) {
+  if (e.dataTransfer && e.dataTransfer.types.includes('application/x-pending-item')) {
+    lastDragPoint.value = getCanvasPoint(e)
+  }
+
   // React to external file drags (from OS) or toolbar item creation drags
   if (e.dataTransfer && e.dataTransfer.types.includes('Files')) {
     isDragOver.value = true
@@ -404,24 +455,44 @@ function handleFileDrop(e) {
   clearTimeout(dragOverTimeout)
 
   const rect = canvasRef.value.getBoundingClientRect()
-  const dropX = Math.round((e.clientX - rect.left) / 10) * 10
-  const dropY = Math.round((e.clientY - rect.top) / 10) * 10
+  const dropPoint = lastDragPoint.value || getCanvasPoint(e, rect)
+  lastDragPoint.value = null
 
   // Check if this is a pending item from staging sidebar
   const pendingItemId = e.dataTransfer?.getData('application/x-pending-item')
   if (pendingItemId) {
-    store.placeItemFromPending(pendingItemId, dropX, dropY)
+    let x = dropPoint.x
+    let y = dropPoint.y
+    const pendingItem = store.boards[pendingItemId]
+
+    if (pendingItem) {
+      // The board icon is centered in the 140px card, so its left edge is 35px in.
+      x -= 35
+    }
+
+    store.placeItemFromPending(
+      pendingItemId,
+      Math.round(x),
+      Math.round(y)
+    )
     return
   }
 
+  const dropX = Math.round(dropPoint.x / 10) * 10
+  const dropY = Math.round(dropPoint.y / 10) * 10
+
   // Check if this is a toolbar item creation drag
-  const createItemType = e.dataTransfer?.getData('application/x-create-item')
-  if (createItemType === 'note') {
-    store.createNote(dropX, dropY)
-    return
-  }
-  if (createItemType === 'board') {
-    store.createBoard(dropX, dropY)
+  const createItemType = e.dataTransfer?.getData('application/x-create-item') || e.dataTransfer?.getData('text/plain')
+  if (['note', 'checklist', 'table', 'board'].includes(createItemType)) {
+    if (createItemType === 'note') {
+      store.createNote(dropX, dropY)
+    } else if (createItemType === 'checklist') {
+      store.createChecklist(dropX, dropY)
+    } else if (createItemType === 'table') {
+      store.createTable(dropX, dropY)
+    } else if (createItemType === 'board') {
+      store.createBoard(dropX, dropY)
+    }
     return
   }
 
@@ -441,6 +512,12 @@ function handleFileDrop(e) {
 function handleKeyDown(e) {
   // Don't handle if user is typing in an input/textarea
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.isContentEditable) {
+    return
+  }
+
+  // Undo the last workspace action
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+    if (store.undoLastAction()) e.preventDefault()
     return
   }
 

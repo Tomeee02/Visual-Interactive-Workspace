@@ -6,9 +6,10 @@
     :style="{
       left: note.x + 'px',
       top: note.y + 'px',
-      width: note.width + 'px',
-      height: note.height + 'px',
+      width: isLinkOnly ? '300px' : note.width + 'px',
+      height: isLinkOnly ? '190px' : note.height + 'px',
       backgroundColor: note.bgColor,
+      borderTop: '3px solid ' + (note.accentColor || '#FFFFFF'),
       color: note.textColor
     }"
     @mousedown="handleMouseDown"
@@ -21,13 +22,36 @@
       class="note-content"
       :style="{ color: note.textColor }"
       @blur="finishEditing"
-      @keydown.enter.exact="finishEditing"
     />
+    <div v-else-if="isLinkOnly" class="note-content link-preview-content">
+      <a class="link-preview" :href="previewUrl" target="_blank" rel="noopener noreferrer" draggable="false" @mousedown.prevent @dragstart.prevent @click.stop="handlePreviewClick" @dblclick.stop.prevent="handlePreviewDoubleClick">
+        <img v-if="linkPreview?.image && !previewImageFailed" class="link-preview-image" :src="linkPreview.image" alt="" referrerpolicy="no-referrer" @error="previewImageFailed = true">
+        <div v-else class="link-preview-image-placeholder" aria-hidden="true" />
+        <div class="link-preview-body">
+          <div class="link-preview-domain"><img v-if="linkPreview?.favicon" :src="linkPreview.favicon" alt="">{{ previewUrl }}</div>
+          <div class="link-preview-title">{{ linkPreview?.title || (previewFailed ? 'Preview unavailable' : 'Link preview loading...') }}</div>
+        </div>
+      </a>
+    </div>
     <div v-else class="note-content" :style="{ color: note.textColor }">
-      {{ note.content || 'Double-click to edit' }}
+      <template v-if="note.content">
+        <template v-for="(part, index) in noteContentParts" :key="index">
+          <a
+            v-if="part.href"
+            class="note-inline-link"
+            :href="part.href"
+            target="_blank"
+            rel="noopener noreferrer"
+            @mousedown.stop
+            @dblclick.stop
+          >{{ part.text }}</a>
+          <template v-else>{{ part.text }}</template>
+        </template>
+      </template>
+      <template v-else>Double-click to edit</template>
     </div>
     <div
-      v-if="!isEditing"
+      v-if="!isEditing && !isLinkOnly"
       class="resize-handle"
       @mousedown.stop="startResize"
     />
@@ -35,8 +59,9 @@
 </template>
 
 <script setup>
-import { ref, nextTick } from 'vue'
+import { computed, ref, nextTick, watch } from 'vue'
 import { useWorkspaceStore } from '../store/workspace'
+import api from '../services/api'
 
 const props = defineProps({
   note: {
@@ -56,11 +81,53 @@ const isEditing = ref(false)
 const editContent = ref('')
 const textareaRef = ref(null)
 const isDragging = ref(false)
+const hasDragged = ref(false)
 const isResizing = ref(false)
 const resizeStart = ref({ x: 0, y: 0, width: 0, height: 0 })
+const linkPreview = ref(null)
+const previewImageFailed = ref(false)
+const previewFailed = ref(false)
+const isLinkOnly = computed(() => /^https?:\/\/\S+$/i.test(props.note.content?.trim() || ''))
+const previewUrl = computed(() => props.note.content?.trim() || '')
+const noteContentParts = computed(() => {
+  const content = props.note.content || ''
+  const parts = []
+  const urlPattern = /https?:\/\/[^\s<>"']+/gi
+  let lastIndex = 0
+
+  for (const match of content.matchAll(urlPattern)) {
+    const rawUrl = match[0]
+    const url = rawUrl.replace(/[.,!?;:)\]]+$/, '')
+    const start = match.index
+
+    if (start > lastIndex) parts.push({ text: content.slice(lastIndex, start) })
+    if (url) parts.push({ text: url, href: url })
+    if (rawUrl.length > url.length) parts.push({ text: rawUrl.slice(url.length) })
+    lastIndex = start + rawUrl.length
+  }
+
+  if (lastIndex < content.length) parts.push({ text: content.slice(lastIndex) })
+  return parts
+})
+
+async function loadLinkPreview(content) {
+  linkPreview.value = null
+  previewImageFailed.value = false
+  previewFailed.value = false
+  const url = content?.trim()
+  if (!/^https?:\/\/\S+$/i.test(url || '')) return
+  try {
+    linkPreview.value = await api.getLinkPreview(url)
+  } catch {
+    previewFailed.value = true
+  }
+}
+
+watch(() => props.note.content, loadLinkPreview, { immediate: true })
 
 function handleMouseDown(e) {
   if (isEditing.value || isResizing.value) return
+  hasDragged.value = false
   
   emit('select', e)
   
@@ -69,6 +136,9 @@ function handleMouseDown(e) {
 
   const handleMouseMove = (moveEvent) => {
     if (isDragging.value) {
+      if (Math.abs(moveEvent.clientX - e.clientX) > 3 || Math.abs(moveEvent.clientY - e.clientY) > 3) {
+        hasDragged.value = true
+      }
       emit('drag', moveEvent)
     }
   }
@@ -84,6 +154,14 @@ function handleMouseDown(e) {
 
   window.addEventListener('mousemove', handleMouseMove)
   window.addEventListener('mouseup', handleMouseUp)
+}
+
+function handlePreviewClick(event) {
+  event.preventDefault()
+}
+
+function handlePreviewDoubleClick(event) {
+  window.open(event.currentTarget.href, '_blank', 'noopener,noreferrer')
 }
 
 function startEditing() {
@@ -173,6 +251,85 @@ function startResize(e) {
   font-size: 14px;
   outline: none;
   overflow: auto;
+}
+
+.note-content:not(textarea):not(.link-preview-content) {
+  white-space: pre-wrap;
+}
+
+.note-inline-link {
+  color: #2563EB;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.link-preview-content {
+  padding: 0;
+  overflow: hidden;
+  border-radius: 5px 5px 8px 8px;
+}
+
+.link-preview {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  color: #1F2937;
+  text-decoration: none;
+  background: transparent;
+}
+
+.link-preview-body {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  height: 100%;
+  padding: 10px 12px;
+  overflow: hidden;
+}
+
+.link-preview-image {
+  width: 100%;
+  height: 105px;
+  flex-shrink: 0;
+  object-fit: cover;
+}
+
+.link-preview-image-placeholder {
+  width: 100%;
+  height: 105px;
+  flex-shrink: 0;
+  background: #F3F4F6;
+}
+
+.link-preview-domain {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+  color: #6B7280;
+  font-size: 11px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.link-preview-domain img {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+
+.link-preview-title {
+  margin-top: 8px;
+  overflow: hidden;
+  color: #1F2937;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.3;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 .resize-handle {
