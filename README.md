@@ -87,6 +87,13 @@ python manage.py migrate
 python manage.py createsuperuser
 ```
 
+Migrations do not create default accounts or assign administrator privileges.
+Google sign-in creates regular users and preserves existing permissions.
+Removing the historical account-seeding code does not change accounts in an
+already migrated database. When upgrading an older database from before owner
+fields were introduced, assign existing ownerless content to the intended user
+explicitly; migrations no longer assign it to a built-in account.
+
 7. Install LibreOffice for accurate `.doc` and `.docx` previews. On Windows:
 ```powershell
 winget install --id TheDocumentFoundation.LibreOffice --exact

@@ -27,3 +27,7 @@ service-account*.json
 # Local logs can contain personal data and access tokens
 *.log
 logs/
+
+# Generated Python bytecode
+__pycache__/
+*.py[cod]

@@ -392,16 +392,10 @@ class GoogleLoginView(APIView):
             username=email,
             defaults={
                 'email': email,
-                'is_staff': email == 'tamas0225@gmail.com',
-                'is_superuser': email == 'tamas0225@gmail.com',
             }
         )
         if created:
             user.set_unusable_password()
-
-        if email == 'tamas0225@gmail.com':
-            user.is_staff = True
-            user.is_superuser = True
 
         if user.email != email:
             user.email = email
