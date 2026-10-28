@@ -51,3 +51,26 @@ pnpm-lock.yaml
 *.pyc
 __pycache__
 app/.git
+
+# Local secrets (keep sanitized configuration examples versioned)
+.env.*
+!.env.example
+!.env.*.example
+*.env
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa
+id_ed25519
+credentials.json
+service-account*.json
+
+# Personal documents and local application data
+/Tamas_Deak_CV.docx
+*.sqlite3
+*.sqlite3-journal
+*.sqlite3-wal
+*.sqlite3-shm
+/app/backend/media/
+/app/backend/data_backups/
